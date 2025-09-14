@@ -6,10 +6,38 @@
 
 generator client {
   provider = "prisma-client-js"
-  output   = "../generated/prisma"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider = "sqlserver"
+  url      = env("VUMBER_DATABASE_URL")
+}
+
+// Models mapped to your existing tables
+model SupaUser {
+  id        String           @id @db.UniqueIdentifier @map("Id")
+  username  String           @unique @db.NVarChar(100) @map("Username")
+  createdAt DateTime?        @default(now()) @db.DateTime2 @map("CreatedAt")
+  userRoles SupaUserRole[]   @relation("userRoles")
+
+  @@map("SupaUsers")
+}
+
+model SupaRole {
+  id        Int              @id @default(autoincrement()) @map("Id")
+  name      String           @unique @db.NVarChar(50) @map("Name")
+  userRoles SupaUserRole[]   @relation("roleUsers")
+
+  @@map("SupaRoles")
+}
+
+model SupaUserRole {
+  userId String @db.UniqueIdentifier @map("UserId")
+  roleId Int                      @map("RoleId")
+
+  user SupaUser @relation(fields: [userId], references: [id], name: "userRoles")
+  role SupaRole @relation(fields: [roleId], references: [id], name: "roleUsers")
+
+  @@id([userId, roleId])
+  @@map("SupaUserRoles")
 }
