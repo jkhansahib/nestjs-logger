@@ -1,228 +1,212 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
-import { Logger } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
-import { sign } from 'jsonwebtoken';
+import { Injectable, Inject, Logger, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import type { AuthProvider } from './auth.interface';
+import { AuthUserService } from './user.service';
 
 @Injectable()
-export class SupabaseAuthService {
-  private supabase: SupabaseClient;
-  private prisma: PrismaClient;
+export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+  private readonly emailDomain = 'vumber.local'; // Domain to append for username->email conversion
 
-    // Using NestJS Logger for logging
-  // This will utilize the Winston logger configured in main.ts
-  private readonly logger = new Logger(SupabaseAuthService.name);
-
-  constructor() {
-    this.supabase = createClient(
-      process.env.SUPABASE_URL!,
-      process.env.SUPABASE_ANON_KEY!,
-    );
-
-    // Initialize Prisma client (uses DATABASE_URL from env)
-    this.prisma = new PrismaClient();
-  }
-
-  // parseExpiresIn: helper to convert number/string like '1h'|'30m'|'3600' to seconds
-  private parseExpiresIn(expiresIn: string | number): number {
-    if (typeof expiresIn === 'number') return expiresIn;
-    if (typeof expiresIn !== 'string') return 3600;
-    const s = expiresIn.trim();
-    if (/^\d+$/.test(s)) return Number(s);
-    const n = Number(s.slice(0, -1));
-    const unit = s.slice(-1);
-    if (isNaN(n)) return 3600;
-    if (unit === 'h') return n * 3600;
-    if (unit === 'm') return n * 60;
-    if (unit === 's') return n;
-    return 3600;
-  }
+  constructor(
+    @Inject('AuthProvider') private authProvider: AuthProvider,
+    private authUserService: AuthUserService
+  ) {}
 
   // --- sign up
-  async signUp(email: string, password: string) {
-    this.logger.log('Attempting to sign up user with email: ' + email);
-    try {
-        const { data, error } = await this.supabase.auth.signUp({ email, password });
-        if (error) throw new UnauthorizedException(error.message);
-
-        // Sync with role tables in your DB using Prisma
-        const userId = (data as any)?.user?.id;
-        if (userId) {
-          try {
-            // create or update SupaUsers
-            await this.prisma.supaUser.upsert({
-              where: { id: userId },
-              // SupaUser model uses `username` column — store email as username
-              create: { id: userId, username: email },
-              update: { username: email },
-            });
-
-            // ensure default 'user' role exists
-            const role = await this.prisma.supaRole.upsert({
-              where: { name: 'user' },
-              create: { name: 'user' },
-              update: {},
-            });
-
-            // link user -> role if not already linked
-            const existing = await this.prisma.supaUserRole.findFirst({
-              where: { userId, roleId: role.id },
-            });
-            if (!existing) {
-              await this.prisma.supaUserRole.create({
-                data: { userId, roleId: role.id },
-              });
-            }
-          } catch (err) {
-            this.logger.error('Failed to sync signup to role tables: ' + (err?.message || String(err)));
-          }
-        }
-
-        return data; // { user, session }
-    } catch (error) {
-        this.logger.error('Error during sign up: ' + error.message.toString(), error.stack);
-        throw error;    
-    }
+  async signUp(username: string, password: string, role: string = 'user') {
+    
+    return await this.authProvider.createUser(username, password, { role });
     
   }
 
   // --- sign in
-  async signIn(email: string, password: string) {
-    const { data, error } = await this.supabase.auth.signInWithPassword({ email, password });
-    if (error) throw new UnauthorizedException(error.message);
-    this.logger.log('before update ', data);
-    // attach role(s) from DB (Prisma) if available
+  async signIn(username: string, password: string) {
+    if (!this.authProvider.signIn) {
+      throw new BadRequestException('Auth provider does not support signIn');
+    }
+
+    //Check if username exists in database
+    let userExists = await this.authUserService.getUserProfileByUsername(username);
+    if(!userExists) {
+      this.logger.log(`AuthService.signIn: username '${username}' does not exist`);
+      throw new UnauthorizedException('Invalid username or password');
+    }
+
+    // Normalize username to email if it doesn't contain '@'
+    let userEmail = username;
+    if (!userEmail.includes('@')) userEmail = `${username}@${this.emailDomain}`;
+    
+    // First, attempt to sign in using the auth provider (Supabase) directly.
     try {
-      const userId = (data as any)?.user?.id;
-      if (userId) {
-        const roles = await this.getRolesForUser(userId);
-        if ((data as any).user) {
-          (data as any).user.roles = roles;
-          (data as any).user.role = roles && roles.length > 0 ? roles[0] : 'user';
+      // If user exists and is already migrated, sigin in directly
+      if(userExists.supabaseMigrated === true) {
 
-          // create a server-signed JWT containing roles
+        const supResult = await this.authProvider.signIn(userEmail, password);
+
+        // Provider returns either a data object or an { error } shape; treat presence of `.error` as failure
+        if (supResult && !(supResult as any).__isAuthError) {
+          this.logger.log(`AuthService.signIn: Supabase sign-in successful for '${username}'`);
+          this.logger.debug(`AuthService.signIn: Supabase sign-in result: ${JSON.stringify(supResult)}`);
+          return supResult;
+        } else {
+          this.logger.log(`AuthService.signIn: Supabase sign-in failed for '${username}'`);
+          throw new UnauthorizedException('Invalid username or password');
+        }
+      } else {
+        this.logger.log(`AuthService.signIn: user '${username}' exists but not migrated, falling back to legacy lookup`);
+        
+        const isLegacyAuthed = await this.authUserService.getUserLegacyAuthed(username, password);
+
+        if (!isLegacyAuthed) {
+          // Nothing we can do — rethrow a generic auth error
+          throw new UnauthorizedException('Invalid username or password');
+        } else {
+          this.logger.log(`AuthService.signIn: legacy authentication successful for '${username}'`);
+          // proceed to migration below
+          // Create user via provider (idempotent: provider.createUser returns { alreadyRegistered: true } when duplicate)
+          let created: any;
           try {
-            const secret = process.env.JWT_SECRET || 'dev-secret';
-            const expiresIn = process.env.JWT_EXPIRES_IN || '1h';
-            const expiresSeconds = this.parseExpiresIn(expiresIn);
-            const payload = { sub: userId, email: (data as any).user.email, roles };
-            const serverToken = sign(payload, secret, { expiresIn });
-            (data as any).server_token = serverToken;
+            created = await this.authProvider.createUser(userEmail, password, { role: 'user' });
+            this.logger.debug(`AuthService.signIn: createUser result: ${JSON.stringify(created)}`);
+            if (created && (created as any).alreadyRegistered) {
+              this.logger.log(`AuthService.signIn: user '${username}' already registered in provider during migration`);
+              // Attempt sign-in with the Supabase credentials we just created
+              try {
+                const postSign = await this.authProvider.signIn(userEmail, password);
+                if (postSign && !(postSign as any).__isAuthError) {
+                  this.logger.log(`AuthService.signIn: Supabase sign-in successful for '${username}' after migration`);
+                  // Mark migrated in legacy store
+                  try {
+                    await this.authUserService.markUserMigrated(userExists.id as number);
+                    this.logger.log(`AuthService.signIn: marked legacy user '${username}' as migrated`);
+                  } catch (mErr) {
+                    this.logger.warn('AuthService.signIn: failed to mark legacy user migrated: ' + (mErr?.message || String(mErr)));
+                  }
+                  return postSign;
+                } else {
+                  // If sign-in still fails, return created marker so caller can decide
+                  this.logger.error(`AuthService.signIn: sign-in failed for '${username}'`);
+                  return postSign;
+                }
+                
+              } catch (sErr) {
+                this.logger.error('AuthService.signIn: sign-in  failed: ' + (sErr?.message || String(sErr)));
+                // return created;
+                throw new UnauthorizedException('Invalid username or password');
+              }
 
-            // replace the Supabase session access_token with our server token if session exists
-            if ((data as any).session) {
-              (data as any).session.access_token = serverToken;
-              (data as any).session.expires_in = expiresSeconds;
-              (data as any).session.expires_at = Math.floor(Date.now() / 1000) + expiresSeconds;
+
+            } else if (created && (created as any).id) {
+              this.logger.log(`AuthService.signIn: created user '${username}' in provider during migration`);
+              // Mark migrated in legacy store
+              try {
+                await this.authUserService.markUserMigrated(userExists.id as number);
+                this.logger.log(`AuthService.signIn: marked legacy user '${username}' as migrated`);
+              } catch (mErr) {
+                this.logger.warn('AuthService.signIn: failed to mark legacy user migrated: ' + (mErr?.message || String(mErr)));
+              }
+              return created;
+            } else {
+              this.logger.error(`AuthService.signIn: unexpected createUser result during migration for '${username}': ` + JSON.stringify(created));
+              throw new UnauthorizedException('Failed to migrate legacy user');
             }
-
           } catch (err) {
-            this.logger.error('Failed to sign server JWT: ' + (err?.message || String(err)));
+            this.logger.error('AuthService.signIn: error creating user during migration: ' + (err?.message || String(err)));
+            throw new UnauthorizedException('Failed to migrate legacy user');
           }
         }
+
       }
     } catch (err) {
-      this.logger.error('Failed to fetch roles after signIn: ' + (err?.message || String(err)));
+      this.logger.log(`AuthService.signIn: Supabase sign-in threw: ${err?.message || err}`);
     }
-    this.logger.log('after update ' , data);
-    return data; // { user, session, server_token }
+
+    
   }
 
-  // New: signInBase - raw Supabase sign-in without server token/role augmentation
-  async signInBase(email: string, password: string) {
-    const { data, error } = await this.supabase.auth.signInWithPassword({ email, password });
-    if (error) throw new UnauthorizedException(error.message);
-    return data; // raw { user, session }
+  // --- refresh access token using refresh token
+  async refreshAccessToken(refreshToken: string) {
+    if (!this.authProvider.refreshToken) {
+      throw new BadRequestException('Auth provider does not support refresh token');
+    }
+    return await this.authProvider.refreshToken(refreshToken);
+  }
+
+  // --- revoke refresh token or revoke by user id
+  async revokeRefreshToken(tokenOrUserId: string) {
+    if (!this.authProvider.revokeRefreshToken) {
+      throw new BadRequestException('Auth provider does not support revokeRefreshToken');
+    }
+    return await this.authProvider.revokeRefreshToken(tokenOrUserId);
   }
 
   // --- sign out
-  async signOut() {
-    const { error } = await this.supabase.auth.signOut();
-    if (error) throw new UnauthorizedException(error.message);
-  }
-
-  // --- ✅ method you need in guard
-  async getUserFromAccessToken(accessToken: string): Promise<User> {
-    const { data, error } = await this.supabase.auth.getUser(accessToken);
-    if (error || !data.user) throw new UnauthorizedException(error?.message || 'Invalid token');
-    return data.user;
-  }
-
-  // --- refresh
-  async refresh(refreshToken: string) {
-    const { data, error } = await this.supabase.auth.refreshSession({ refresh_token: refreshToken });
-    if (error || !data.session) throw new UnauthorizedException(error?.message || 'Refresh failed');
-    return data.session;
-  }
-
-  async refreshAccessToken(refreshToken: string) {
-    try {
-      const { data, error } = await this.supabase.auth.refreshSession({ refresh_token: refreshToken });
-      if (error || !data.session) throw error || new UnauthorizedException('Refresh failed');
-
-      // attach role(s) from DB (Prisma) to the returned session.user
-      try {
-        const userId = (data as any)?.session?.user?.id;
-        if (userId) {
-          const roles = await this.getRolesForUser(userId);
-          if ((data as any).session.user) {
-            (data as any).session.user.roles = roles;
-            (data as any).session.user.role = roles && roles.length > 0 ? roles[0] : 'user';
-
-            // sign server jwt for refreshed session
-            try {
-              const secret = process.env.JWT_SECRET || 'dev-secret';
-              const expiresIn = process.env.JWT_EXPIRES_IN || '1h';
-              const expiresSeconds = this.parseExpiresIn(expiresIn);
-              const payload = { sub: userId, email: (data as any).session.user.email, roles };
-              const serverToken = sign(payload, secret, { expiresIn });
-              (data as any).session.server_token = serverToken;
-
-              // replace the access_token with server-signed token
-              (data as any).session.access_token = serverToken;
-              (data as any).session.expires_in = expiresSeconds;
-              (data as any).session.expires_at = Math.floor(Date.now() / 1000) + expiresSeconds;
-
-            } catch (err) {
-              this.logger.error('Failed to sign server JWT during refresh: ' + (err?.message || String(err)));
-            }
-          }
-        }
-      } catch (err) {
-        this.logger.error('Failed to fetch role during refresh: ' + (err?.message || String(err)));
-      }
-
-      return data.session; // contains access_token, refresh_token, user, and session.server_token
-    } catch (err) {
-      throw new UnauthorizedException('Invalid refresh token');
+  async signOut(accessTokenOrUserId?: string) {
+    if (!this.authProvider.signOut) {
+      throw new BadRequestException('Auth provider does not support signOut');
     }
+    const data = await this.authProvider.signOut(accessTokenOrUserId || '');
+    // return provider response directly; provider is responsible for normalization
+    return data;
   }
 
-  // Helper: return role names assigned to a user via SupaUserRoles -> SupaRoles
-  async getRolesForUser(userId: string): Promise<string[]> {
-    try {
-      const userRoles = await this.prisma.supaUserRole.findMany({
-        where: { userId },
-        include: { role: true },
-      });
-      const userRolesList = userRoles.map((ur) => ur.role?.name).filter(Boolean) as string[];
-      this.logger.log(`User ${userId} has roles: ${userRolesList.join(', ')}`);
-      return userRolesList;
-
-    } catch (err) {
-      this.logger.error('Error loading roles for user ' + userId + ': ' + (err?.message || String(err)));
-      return [];
+  // --- change password
+  async changePassword(userIdOrAccessToken: string, oldPassword: string | null, newPassword: string) {
+    if (!this.authProvider.changePassword) {
+      throw new BadRequestException('Auth provider does not support changePassword');
     }
+    return await this.authProvider.changePassword(userIdOrAccessToken, oldPassword, newPassword);
   }
 
-  // ✅ Add helper for profile (keeps previous guard compatibility)
-  async getProfile(userId: string) {
-    try {
-      const roles = await this.getRolesForUser(userId);
-      return { role: roles && roles.length > 0 ? roles[0] : 'user' };
-    } catch (error) {
-      this.logger.error('Error fetching profile for userId ' + userId + ': ' + (error?.message ?? error), error?.stack);
-      return null;
+  // --- forgot / send reset
+  async sendPasswordReset(email: string) {
+    if (!this.authProvider.sendPasswordReset) {
+      throw new BadRequestException('Auth provider does not support sendPasswordReset');
     }
-}
+    return await this.authProvider.sendPasswordReset(email);
+  }
+
+  // --- reset password
+  async resetPassword(accessTokenOrCode: string, newPassword: string) {
+    if (!this.authProvider.resetPassword) {
+      throw new BadRequestException('Auth provider does not support resetPassword');
+    }
+    return await this.authProvider.resetPassword(accessTokenOrCode, newPassword);
+  }
+
+  // --- introspect token
+  async introspectToken(token: string) {
+    if (!this.authProvider.introspectToken) {
+      throw new BadRequestException('Auth provider does not support introspection');
+    }
+    return await this.authProvider.introspectToken(token);
+  }
+
+  // --- anonymous login (prefer provider-level anonymous sign-in, fallback to createUser+signIn)
+  async anonymousLogin() {
+    this.logger.log('anonymousLogin requested');
+
+    // Prefer provider-level anonymous sign-in if implemented
+    const anyProvider = this.authProvider as any;
+    if (typeof anyProvider.signInAnonymously === 'function') {
+      return await anyProvider.signInAnonymously();
+    }
+
+    // // Fallback: create an ephemeral user and sign in
+    // const { randomUUID } = await import('crypto');
+    // const id = randomUUID();
+    // const email = `anon+${id}@example.local`;
+    // const password = id;
+
+    // if (!this.authProvider.createUser || !this.authProvider.signIn) {
+    //   throw new BadRequestException('Auth provider does not support anonymous fallback flows');
+    // }
+
+    // const created = await this.authProvider.createUser(email, password, { anonymous: true, role: 'user' });
+    // if (created && (created as any).alreadyRegistered) {
+    //   return await this.authProvider.signIn(email, password);
+    // }
+
+    // return await this.authProvider.signIn(email, password);
+  }
 }

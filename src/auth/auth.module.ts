@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
 import { AuthController } from './auth.controller';
-import { SupabaseAuthService } from './auth.service';
-import { SupabaseAuthGuard } from './auth.guard';
+import { AuthGuard } from './auth.guard';
+import { AuthService } from './auth.service';
+import { SupabaseAuthProvider } from './supabase-auth.provider';
+import { AuthUserService } from './user.service';
 
 @Module({
   controllers: [AuthController],
-  providers: [SupabaseAuthService, SupabaseAuthGuard],
-  exports: [SupabaseAuthService], // export if other modules need it
+  providers: [AuthGuard, AuthService, AuthUserService, { provide: 'AuthProvider', useClass: SupabaseAuthProvider }],
+  exports: [AuthService, 'AuthProvider', AuthUserService], // export AuthProvider token and AuthUserService
 })
 export class AuthModule {}

@@ -41,3 +41,33 @@ model SupaUserRole {
   @@id([userId, roleId])
   @@map("SupaUserRoles")
 }
+
+// ppn_UserProfile mapping - contains a system UserId and the EmailAddress used by sign-in flows
+// The table lives in the default dbo schema; only the table name is mapped here.
+model PpnUserProfile {
+  // Table columns mapped from existing database schema
+  id               Int       @id @default(autoincrement()) @db.Int @map("Id")
+  type             String    @db.NVarChar(64) @map("Type")
+  userId           String    @db.NVarChar(64) @map("UserId")
+  accountNo        Int       @db.Int @default(0) @map("AccountNo")
+  membershipGrpId  Int       @db.Int @map("MembershipGrpId")
+  email            String    @db.NVarChar(256) @map("EmailAddress")
+  firstName        String    @db.NVarChar(64) @default("") @map("FirstName")
+  lastName         String    @db.NVarChar(64) @default("") @map("LastName")
+  jobTitle         String    @db.NVarChar(64) @default("") @map("JobTitle")
+  phoneNumber      String    @db.NVarChar(64) @default("") @map("PhoneNumber")
+  timeZone         String    @db.NVarChar(64) @default("") @map("TimeZone")
+  timeFormat       String    @db.NVarChar(10) @default("") @map("TimeFormat")
+  lastLoginDate    DateTime? @db.DateTime @map("LastLoginDate")
+  photo            String    @db.NVarChar(256) @default("") @map("Photo")
+  status           Int       @db.Int @default(0) @map("Status")
+  supabaseMigrated Boolean   @db.Bit  @default(false) @map("supabase_migrated")
+  options          String?   @db.NVarChar(4000) @map("Options")
+  addedBy          String    @db.NVarChar(256) @map("AddedBy")
+  addedDate        DateTime  @db.DateTime @default(dbgenerated("getutcdate()")) @map("AddedDate")
+  modifiedBy       String    @db.NVarChar(256) @map("ModifiedBy")
+  modifiedDate     DateTime  @db.DateTime @default(dbgenerated("getutcdate()")) @map("ModifiedDate")
+
+  @@map("ppn_UserProfile")
+  @@index([userId], map: "nci_wi_ppn_UserProfile_73AD94C3267452F11C44EE8EB4176BEE")
+}

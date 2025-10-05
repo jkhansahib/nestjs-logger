@@ -84,7 +84,9 @@ CREATE POLICY "Select own profile"
 
 
 
- 
 
+npm install @prisma/client
+npm install -D prisma
+npx prisma generate
 
 

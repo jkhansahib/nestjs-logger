@@ -5,14 +5,16 @@ import { AppService } from './app.service';
 import { LoggerModule } from './logger/logger.module'; // ✅ Import your logger module
 import { AuthModule } from './auth/auth.module';  // ✅ Import AuthModule
 import { APP_GUARD } from '@nestjs/core';
-import { SupabaseAuthGuard as AuthGuard } from './auth/auth.guard'; // ✅ Import your global auth guard
+import { AuthGuard as AuthGuard } from './auth/auth.guard'; // ✅ Import your global auth guard
 import { UserModule } from './user/user.module';
+import { HealthController } from './health/health.controller';
+import { HealthService } from './health/health.service';
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true }), // ✅ load .env
     LoggerModule, AuthModule,UserModule], // ✅ Add here
-  controllers: [AppController],
-  providers: [AppService,{
+  controllers: [AppController, HealthController],
+  providers: [AppService, HealthService,{
       provide: APP_GUARD,
       useClass: AuthGuard, // ✅ applies to all controllers/routes
     },],

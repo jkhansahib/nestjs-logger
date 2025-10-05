@@ -5,22 +5,24 @@ import {
   Injectable,
   UnauthorizedException,
   ForbiddenException,
+  Inject,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { SupabaseAuthService } from './auth.service';
 import { ROLES_KEY } from './roles.decorator';
 import { IS_PUBLIC_KEY } from './public.decorator';
 import { Logger } from '@nestjs/common';
 import { verify } from 'jsonwebtoken';
-
+// import { SupabaseAuthProvider } from './supabase-auth.provider';
+// inject by the exported token name from AuthModule
+// the provider token is the string 'AuthProvider'
 
 @Injectable()
-export class SupabaseAuthGuard implements CanActivate {
-  private readonly logger = new Logger(SupabaseAuthGuard.name);
+export class AuthGuard implements CanActivate {
+  private readonly logger = new Logger(AuthGuard.name);
 
   constructor(
     private reflector: Reflector,
-    private supabaseAuth: SupabaseAuthService,
+    @Inject('AuthProvider') private readonly authProvider: any,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -43,39 +45,76 @@ export class SupabaseAuthGuard implements CanActivate {
       const token = authHeader.split(' ')[1];
       if (!token) throw new UnauthorizedException('Invalid token');
 
-      // First, try verifying our server-signed JWT (contains roles)
-      try {
-        const secret = process.env.JWT_SECRET || 'dev-secret';
-        const decoded = verify(token, secret) as any;
-        if (decoded && decoded.sub) {
-          // attach user from server token
-          const role = decoded.roles && decoded.roles.length > 0 ? decoded.roles[0] : (decoded.role || 'user');
-          request.user = { id: decoded.sub, email: decoded.email, role, roles: decoded.roles || [] };
-          this.logger.log(`✔️ Verified server token for user ${decoded.sub}`);
+      // Prefer verifying tokens via the AuthProvider (Supabase) since tokens are Supabase-issued
+      let verifiedByProvider = false;
+      if (this.authProvider && typeof this.authProvider.verifyToken === 'function') {
+        const providerIsSupabase =  this.authProvider?.constructor?.name === 'SupabaseAuthProvider';
+        if (providerIsSupabase) this.logger.log('Using SupabaseAuthProvider for token verification');
+        try {
+          const introspect = await this.authProvider.verifyToken(token);
+
+          // Support two shapes:
+          // 1) { active: boolean, payload?: any }
+          // 2) direct Supabase user object
+          let payload: any = null;
+          if (introspect && typeof introspect === 'object') {
+            if ('active' in introspect) {
+              if (!introspect.active) {
+                this.logger.log('Provider reported token inactive/invalid');
+              } else {
+                payload = (introspect as any).payload || introspect;
+              }
+            } else {
+              // treat returned object as the user payload
+              payload = introspect;
+            }
+          }
+
+          if (payload) {
+            const userId = payload?.sub || payload?.id || payload?.user?.id || payload?.id;
+            const email = payload?.email || payload?.user?.email || payload?.email;
+            const roles = payload?.roles || payload?.user?.roles || (payload?.user_metadata && payload.user_metadata.role ? [payload.user_metadata.role] : []);
+
+            request.user = { id: userId, email, roles, role: Array.isArray(roles) && roles.length > 0 ? roles[0] : 'user' };
+            this.logger.log(`✔️ Verified provider token for user ${userId}`);
+            verifiedByProvider = true;
+          }
+        } catch (err) {
+          this.logger.log('Provider token verification failed, will try server token as fallback', err?.message || err);
         }
-      } catch (err) {
-        // Not a server token or invalid — fall back to Supabase access token
-        this.logger.log('Server token verification failed, falling back to Supabase access token');
-
-        // 1️⃣ Get user from Supabase access token
-        const user = await this.supabaseAuth.getUserFromAccessToken(token);
-        if (!user) throw new UnauthorizedException('Invalid user');
-
-        // ✅ fetch role from profile using the service method
-        const profile = await this.supabaseAuth.getProfile(user.id);
-
-        // attach user + profile
-        request.user = { ...user, role: profile?.role || 'user' };
+      } else {
+        this.logger.log('No auth provider available to verify access token; will try server token fallback');
       }
 
-      // 3️⃣ Role check
+      // // If provider didn't verify, fall back to server-signed JWT verification (legacy path)
+      // if (!verifiedByProvider) {
+      //   try {
+      //     const secret = process.env.JWT_SECRET || 'dev-secret';
+      //     const decoded = verify(token, secret) as any;
+      //     if (decoded && decoded.sub) {
+      //       const role = decoded.roles && decoded.roles.length > 0 ? decoded.roles[0] : (decoded.role || 'user');
+      //       request.user = { id: decoded.sub, email: decoded.email, role, roles: decoded.roles || [] };
+      //       this.logger.log(`✔️ Verified server token for user ${decoded.sub}`);
+      //       verifiedByProvider = true;
+      //     }
+      //   } catch (err) {
+      //     this.logger.log('Server token verification failed');
+      //   }
+      // }
+
+      if (!verifiedByProvider) {
+        throw new UnauthorizedException('Invalid token');
+      }
+
+      this.logger.log(`User roles: ${request.user.roles}`);
+      // Role check
       const requiredRoles = this.reflector.getAllAndOverride<string[]>(
         ROLES_KEY,
         [context.getHandler(), context.getClass()],
       );
-
+      this.logger.log(`Required roles for route: ${requiredRoles}`);
+      
       if (requiredRoles && requiredRoles.length > 0) {
-        // normalize user's roles to an array for checks
         const userRoles: string[] = Array.isArray(request.user?.roles)
           ? request.user.roles
           : request.user?.role

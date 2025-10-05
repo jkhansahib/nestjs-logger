@@ -1,30 +1,84 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
-import { Logger } from 'winston';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { LOGGER_ADAPTER } from './logger.adapter';
+import type { ILoggerAdapter } from './logger.adapter';
 
 @Injectable()
 export class LoggerService {
   constructor(
-    @Inject(WINSTON_MODULE_NEST_PROVIDER) private readonly logger: Logger
+    @Optional() @Inject(LOGGER_ADAPTER) private readonly adapter?: ILoggerAdapter,
   ) {}
 
-  log(message: string, context?: string) {
-    this.logger.info(message, { context });
+  private get logger(): ILoggerAdapter {
+    // Provide a minimal console adapter when no adapter injected
+    if (this.adapter) return this.adapter;
+    return {
+      log: (m: any, meta?: any) => console.log('[INFO]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      info: (m: any, meta?: any) => console.log('[INFO]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      error: (m: any, meta?: any) => console.error('[ERROR]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      warn: (m: any, meta?: any) => console.warn('[WARN]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      debug: (m: any, meta?: any) => console.debug('[DEBUG]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      verbose: (m: any, meta?: any) => console.log('[VERBOSE]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      child: (meta: any) => null,
+      getLogger: () => console,
+    } as ILoggerAdapter;
   }
 
-  error(message: string, trace?: string, context?: string) {
-    this.logger.error(message, { trace, context });
+  private safeInvoke(method: keyof ILoggerAdapter, message: any, meta?: any) {
+    try {
+      const logger = this.logger;
+      const fn = (logger as any)[method];
+      if (fn && typeof fn === 'function') {
+        if (meta && typeof meta === 'object') {
+          fn.call(logger, message, meta);
+        } else if (meta !== undefined) {
+          fn.call(logger, message, { context: String(meta) });
+        } else {
+          fn.call(logger, message);
+        }
+        return;
+      }
+
+      // fallback to generic log
+      if ((logger as any).log && typeof (logger as any).log === 'function') {
+        (logger as any).log(method, message, meta);
+        return;
+      }
+
+      // final fallback
+      console.log(`[${String(method).toUpperCase()}]`, meta || '', typeof message === 'object' ? JSON.stringify(message) : message);
+    } catch (err) {
+      console.log(`[${String(method).toUpperCase()}]`, message, meta || '', '(logger fallback)');
+    }
   }
 
-  warn(message: string, context?: string) {
-    this.logger.warn(message, { context });
+  log(message: string | object, context?: string | object) {
+    this.safeInvoke('info', message, context);
   }
 
-  debug(message: string, context?: string) {
-    this.logger.debug(message, { context });
+  error(message: string | object, trace?: string | object, context?: string | object) {
+    const meta: any = {};
+    if (trace) meta.trace = trace;
+    if (context) meta.context = context;
+    this.safeInvoke('error', message, Object.keys(meta).length ? meta : undefined);
   }
 
-  verbose(message: string, context?: string) {
-    this.logger.verbose(message, { context });
+  warn(message: string | object, context?: string | object) {
+    this.safeInvoke('warn', message, context);
+  }
+
+  debug(message: string | object, context?: string | object) {
+    this.safeInvoke('debug', message, context);
+  }
+
+  verbose(message: string | object, context?: string | object) {
+    this.safeInvoke('verbose', message, context);
+  }
+
+  getLogger(): any {
+    return this.logger.getLogger ? this.logger.getLogger() : this.logger;
+  }
+
+  child(meta: any): any {
+    return this.logger.child ? this.logger.child(meta) : this.logger;
   }
 }

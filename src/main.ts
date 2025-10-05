@@ -1,27 +1,23 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { WinstonModule } from 'nest-winston';
-import { winstonConfig } from './logger/winston.config';
-import * as winston from 'winston';
 import { LoggerService } from './logger/logger.service';
 
-
 async function bootstrap() {
-  // const app = await NestFactory.create(AppModule, {
-  //   logger: WinstonModule.createLogger(winstonConfig),
-  // });
-  const app = await NestFactory.create(AppModule, {
-    logger: WinstonModule.createLogger({
-      transports: [
-        new winston.transports.Console(),
-        new winston.transports.File({
-          filename: `logs/${new Date().toISOString().split('T')[0]}.log`,
-          format: winston.format.json(),
-        }),
-      ],
-    }),
-  });
+  // Create the app without supplying a custom logger so we can attach our LoggerService
+  const app = await NestFactory.create(AppModule);
+
+  // Use the application's LoggerService as Nest's logger implementation
+  try {
+    const loggerService = app.get(LoggerService);
+    if (loggerService) {
+      app.useLogger(loggerService as any);
+    }
+  } catch (e) {
+    // If logger isn't available yet, fall back to default Nest logger
+    console.warn('Warning: could not attach LoggerService as Nest logger:', e?.message || e);
+  }
+
   // Swagger setup
   const config = new DocumentBuilder()
     .setTitle('NestJS Boilerplate API')
