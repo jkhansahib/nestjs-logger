@@ -6,7 +6,8 @@ export class UsersService {
   constructor(@Inject('AuthProvider') private authProvider: AuthProvider) {}
 
   async register(email: string, password: string, role: string) {
-    const user = await this.authProvider.createUser(email, password, { role });
+    // AuthProvider.createUser(email, phone, password, metadata)
+    const user = await this.authProvider.createUser(email, '', password, { role });
     return user;
   }
 }

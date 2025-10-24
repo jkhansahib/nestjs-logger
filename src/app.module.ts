@@ -9,10 +9,11 @@ import { AuthGuard as AuthGuard } from './auth/auth.guard'; // ✅ Import your g
 import { UserModule } from './user/user.module';
 import { HealthController } from './health/health.controller';
 import { HealthService } from './health/health.service';
+// Email module removed from top-level imports; test email controller is registered under AuthModule
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true }), // ✅ load .env
-    LoggerModule, AuthModule,UserModule], // ✅ Add here
+    LoggerModule, AuthModule, UserModule], // ✅ Add here
   controllers: [AppController, HealthController],
   providers: [AppService, HealthService,{
       provide: APP_GUARD,

@@ -2,6 +2,8 @@ import { Controller, Post, Body, Get, Req, UseGuards, UnauthorizedException } fr
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
 import { Roles } from './roles.decorator';
+import { SendOtpDto } from './dto/send-otp.dto';
+import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -9,23 +11,24 @@ export class AuthController {
 
   @Public()
   @Post('signup')
-  async signUp(@Body() body: { username: string; password: string }) {
+  async signUp(@Body() body: { username: string;phone: string; roles: string; password: string }) {
     console.log(`AuthController.signUp called for ${body.username}`);
-    if (!body.username || !body.password) {
-      throw new UnauthorizedException('Username and password are required');
+    if (!body.username || !body.password || !body.phone || !body.roles) {
+      throw new UnauthorizedException('Username,phone,roles and password are required');
     }
     
-    return this.Auth.signUp(body.username, body.password);
+    return this.Auth.signUp(body.username, body.phone, body.roles, body.password);
   }
 
   @Public()
   @Post('signin')
-  async signIn(@Body() body: { username: string; password: string }) {
+  async signIn(@Body() body: { username: string; password: string, device: any }) {
     try {
       if (!body.username || !body.password) {
         throw new UnauthorizedException('Username and password are required');
       }   
-      return this.Auth.signIn(body.username, body.password);
+      // return this.Auth.signInSupabase(body.username, body.password);
+      return this.Auth.signInPrivate(body.username, body.password, body.device || null);
     } catch (error) {
       console.error('Error during signIn:', error);
       throw error; // Re-throw the error after logging it
@@ -119,4 +122,22 @@ export class AuthController {
     return result;
   }
 
+  // --- Send OTP
+  @Public()
+  @Post('signin-with-otp')
+  async sendOtp(@Body() body: SendOtpDto) {
+    if (!body?.phone) throw new UnauthorizedException('phone is required');
+    // Note: recommended to normalize to E.164 on the client or use libphonenumber server-side.
+    const res = await this.Auth.sendPhoneOtp(body.phone, body.channel || 'sms');
+    return res;
+  }
+
+  // --- Sign in with OTP
+  @Public()
+  @Post('otp/verify')
+  async signInWithOtp(@Body() body: VerifyOtpDto) {
+    if (!body?.phone || !body?.token) throw new UnauthorizedException('phone and token are required');
+    const res = await this.Auth.verifyPhoneOtp(body.phone, body.token);
+    return res;
+  }
 }

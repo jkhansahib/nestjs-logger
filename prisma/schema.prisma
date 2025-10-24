@@ -71,3 +71,26 @@ model PpnUserProfile {
   @@map("ppn_UserProfile")
   @@index([userId], map: "nci_wi_ppn_UserProfile_73AD94C3267452F11C44EE8EB4176BEE")
 }
+
+// Mapping for existing user_devices table to allow Prisma CRUD operations
+model UserDevice {
+  id                   Int       @id @default(autoincrement()) @db.Int @map("id")
+  userId               Int       @db.Int @map("user_id")
+  deviceId             String    @db.NVarChar(255) @map("device_id")
+  deviceType           String    @db.NVarChar(100) @map("device_type")
+  deviceName           String?   @db.NVarChar(255) @map("device_name")
+  refreshToken         String?   @db.NVarChar(50) @map("refresh_token")
+  isActive             Boolean   @db.Bit @default(true) @map("is_active")
+  lastLoginDatetime    DateTime? @db.DateTime2 @map("last_login_datetime")
+  expiresDatetime      DateTime? @db.DateTime2 @map("expires_datetime")
+  lastRefreshDatetime  DateTime? @db.DateTime2 @map("last_refresh_datetime")
+  platform             String?   @db.NVarChar(100) @map("platform")
+  brandId              Int?      @db.Int @map("brand_id")
+  notificationKey      String?   @db.NVarChar(4000) @map("notification_key")
+  notificationKeyVoip  String?   @db.NVarChar(4000) @map("notification_key_voip")
+  ipInfo               String?   @db.NVarChar(1000) @map("ip_info")
+  deviceInfo           String?   @db.NVarChar(4000) @map("device_info")
+
+  @@map("user_devices")
+  @@index([deviceId, userId], map: "idx_device_user")
+}
