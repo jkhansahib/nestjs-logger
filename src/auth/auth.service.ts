@@ -31,6 +31,32 @@ export class AuthService {
     return appendDomainIfMissing ? `${trimmed}@${this.emailDomain}` : '';
   }
 
+  /**
+   * Mock helper to resolve roles for a given local user id.
+   * - Tries to read roles/role/user_metadata.role from the local users table via UsersService.
+   * - Falls back to a simple mapping for development/testing (userId===1 -> ['admin','user']).
+   * - Returns ['user'] by default.
+   */
+  private async getUserRoles(userId: number): Promise<string[]> {
+    if (!userId) return ['user'];
+    try {
+      // const local = await this.usersService.getUserById(Number(userId));
+      // if (local) {
+      //   // common shapes: roles array, role string, or user_metadata.role
+      //   if ((local as any).roles && Array.isArray((local as any).roles)) return (local as any).roles;
+      //   if ((local as any).role && typeof (local as any).role === 'string') return [(local as any).role];
+      //   if ((local as any).user_metadata && (local as any).user_metadata.role) return [ (local as any).user_metadata.role ];
+      // }
+      // TODO: Implement proper role lookup from local users table
+      return ['user'];
+    } catch (err) {
+      this.logger.debug && this.logger.debug('getUserRoles: lookup failed: ' + (err?.message || String(err)));
+    }
+
+    // Simple dev/test mapping
+    if (Number(userId) === 1) return ['admin', 'user'];
+    return ['user'];
+  }
 
   // --- sign up
   async signUp(email: string, phone: string, password: string, device:any ) {
@@ -159,6 +185,7 @@ export class AuthService {
     }
   }
 
+  
  private async  generateJWTToken(userId: number, user:any, roles:any, device: any, refreshToken: string): Promise<any> {
   // Avoid logging secrets (refresh tokens) or full user objects
   this.logger.debug(`AuthService.generateJWTToken: generating token for userId=${userId} device=${device?.id || 'n/a'} roles=${JSON.stringify(roles)}`);
@@ -399,7 +426,12 @@ export class AuthService {
         const res = await anyProvider.sendOtpToPhone(phone, channel);
         this.logger.log(`sendPhoneOtp successful for ${phone}`);
         this.logger.debug(`sendPhoneOtp result for ${phone}: ${JSON.stringify(res)}`);  
-        return res;
+        if((res as any)?.error){
+          this.logger.error(`sendPhoneOtp error for ${phone}: ${JSON.stringify((res as any).error)}`);
+          return { ok: false, error: (res as any).error?.message || 'Failed to send OTP' };
+        } else {
+          return { ok: true };
+        }
 
     } catch (error) {
       this.logger.error('sendPhoneOtp error', error);
@@ -409,7 +441,7 @@ export class AuthService {
   }
 
   // --- verify OTP for phone and sign-in (delegates to provider)
-  async verifyPhoneOtp(phone: string, token: string) {
+  async verifyPhoneOtp(phone: string, token: string, device: any) {
     if (!phone || !token) throw new BadRequestException('phone and token are required');
     const anyProvider = this.authProvider as any;
     if (typeof anyProvider.verifyPhoneOtp !== 'function') {
@@ -417,13 +449,86 @@ export class AuthService {
     }
     this.logger.log(`verifyPhoneOtp requested for ${phone}`);
     // Do not log token
-    const res = await anyProvider.verifyPhoneOtp(phone, token);
+    const {data, error} = await anyProvider.verifyPhoneOtp(phone, token);
     this.logger.log(`verifyPhoneOtp completed for ${phone}`);
-    this.logger.debug(`verifyPhoneOtp result for ${phone}: ${JSON.stringify(res)}`);
+    this.logger.debug(`verifyPhoneOtp result for ${phone}: ${JSON.stringify(data)}`);
+    if(error){
+      this.logger.error(`verifyPhoneOtp error for ${phone}: ${JSON.stringify(error)}`);
+      throw new UnauthorizedException(error.message || 'Invalid OTP token');
+    }
 
+    // extract provider user id from provider response
+    const providerUserId = (data as any)?.user?.id ? String((data as any).user.id) : null;
+    let localUser: any = null;
+
+    if (providerUserId) {
+      try {
+        localUser = await this.usersService.getUserByAuthProviderId(AuthProviderEnum.supabase, providerUserId);
+        this.logger.log(`verifyPhoneOtp: resolved local user for providerId=${providerUserId} -> id=${localUser?.id ?? 'not found'}`);
+        // attach local user id to response for caller convenience
+        (data as any).local_user_id = localUser?.id ?? null;
+        try {
+          // Extract refresh token and device info from provider response if available
+          const refreshToken = (data as any)?.session?.refresh_token ?? null;
+          const providerUser = (data as any)?.user ?? null;
+
+          // const deviceFromProvider = (data as any)?.device;
+          // const device = deviceFromProvider
+          //   ? {
+          //       id: deviceFromProvider.id ?? `phone-${phone}`,
+          //       type: deviceFromProvider.type ?? 'phone',
+          //       name: deviceFromProvider.name ?? 'Phone OTP',
+          //       platform: deviceFromProvider.platform ?? 'phone',
+          //       ip: deviceFromProvider.ip ?? null,
+          //     }
+          //   : {
+          //       id: `phone-${phone}`,
+          //       type: 'phone',
+          //       name: 'Phone OTP',
+          //       platform: 'phone',
+          //       ip: null,
+          //     };
+
+          // Ensure we have a local user record; create one if missing
+          // let localUserId: number | null = localUser?.id ?? null;
+          // if (!localUserId) {
+          //   try {
+          //     const created = await this.usersService.createUser({
+          //       user_name: providerUser?.email ?? phone,
+          //       auth_provider: AuthProviderEnum.supabase,
+          //       auth_provider_id: providerUser?.id ? String(providerUser.id) : providerUserId,
+          //       phone_number: phone ?? null,
+          //       email: providerUser?.email ?? null,
+          //       is_anonymous: false,
+          //       is_active: true,
+          //     });
+          //     localUserId = created?.id ?? null;
+          //     (data as any).local_user_id = localUserId;
+          //     this.logger.log(`verifyPhoneOtp: created local user id=${localUserId} for providerId=${providerUserId}`);
+          //   } catch (createErr) {
+          //     this.logger.warn('verifyPhoneOtp: failed to create local user record', createErr);
+          //   }
+          // }
+
+          // Resolve roles and generate a JWT response
+          const roles = await this.getUserRoles(localUser.id ?? 0);
+          const jwtResponse = await this.generateJWTToken(localUser.id ?? 0, providerUser, roles, device, refreshToken);
+
+          // Return the JWT-shaped response to caller
+          return jwtResponse;
+        } catch (err) {
+          this.logger.error('verifyPhoneOtp: failed to generate JWT', err);
+          throw new UnauthorizedException('Failed to complete phone OTP sign-in');
+        }
+      } catch (lookupErr) {
+        this.logger.warn(`verifyPhoneOtp: error looking up user by providerId=${providerUserId}`, lookupErr);
+      }
+    } else {
+      this.logger.log('verifyPhoneOtp: provider response did not include user.id');
+    }
     // Optionally, perform legacy migration: if the phone maps to a legacy profile that isn't migrated,
     // create a provider user and mark migrated. This is left intentionally minimal — implementers
     // may extend this behavior to fetch profile by phone and reconcile roles/metadata.
-    return res;
+    return data;
   }
 }

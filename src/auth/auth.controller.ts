@@ -137,7 +137,7 @@ export class AuthController {
   @Post('otp/verify')
   async signInWithOtp(@Body() body: VerifyOtpDto) {
     if (!body?.phone || !body?.token) throw new UnauthorizedException('phone and token are required');
-    const res = await this.Auth.verifyPhoneOtp(body.phone, body.token);
+    const res = await this.Auth.verifyPhoneOtp(body.phone, body.token, body.device);
     return res;
   }
 }

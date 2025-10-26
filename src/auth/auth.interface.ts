@@ -33,5 +33,5 @@ export interface AuthProvider {
   // Send an OTP (e.g. via SMS) to a phone number (E.164). channel optional (sms/voice)
   sendOtpToPhone?(phone: string, channel?: 'sms' | 'voice'): Promise<any>;
   // Verify an OTP token for a phone number and sign-in/return session
-  verifyPhoneOtp?(phone: string, token: string): Promise<any>;
+  verifyPhoneOtp?(phone: string, token: string, device: any): Promise<any>;
 }

@@ -225,8 +225,16 @@ export class SupabaseAuthProvider implements AuthProvider {
   }
 
   async verifyPhoneOtp(phone: string, token: string): Promise<any> {
-    const payload: any = { phone, token, options: { shouldCreateUser: false } };
-    const res = await (this.publicClient.auth as any).signInWithOtp(payload as any);
-    return res;
+    if (!phone || !token) throw new Error('phone and token are required');
+    try {
+      // Use the verifyOtp helper which accepts { phone, token, type }
+      const { data, error } = await (this.publicClient.auth as any).verifyOtp({ phone, token, type: 'sms' } as any);
+      // Avoid logging the token; log only outcome
+      this.loggerService?.debug?.(`SupabaseAuthProvider.verifyPhoneOtp: result for phone=${phone} error=${!!error}`);
+      return { data, error };
+    } catch (err) {
+      this.loggerService?.error('SupabaseAuthProvider.verifyPhoneOtp: unexpected error', err);
+      throw err;
+    }
   }
 }
