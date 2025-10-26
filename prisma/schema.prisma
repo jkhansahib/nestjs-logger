@@ -75,7 +75,7 @@ model PpnUserProfile {
 // Mapping for existing user_devices table to allow Prisma CRUD operations
 model UserDevice {
   id                   Int       @id @default(autoincrement()) @db.Int @map("id")
-  userId               Int       @db.Int @map("user_id")
+  userId               BigInt    @db.BigInt @map("user_id")
   deviceId             String    @db.NVarChar(255) @map("device_id")
   deviceType           String    @db.NVarChar(100) @map("device_type")
   deviceName           String?   @db.NVarChar(255) @map("device_name")
@@ -93,4 +93,20 @@ model UserDevice {
 
   @@map("user_devices")
   @@index([deviceId, userId], map: "idx_device_user")
+}
+
+// Mapping for existing users table used for auth/device tracking
+model User {
+  id              BigInt   @id @default(autoincrement()) @db.BigInt @map("id")
+  userName        String?  @db.NVarChar(255) @map("user_name")
+  authProvider    Int?     @db.Int            @map("auth_provider")
+  authProviderId  String?  @db.NVarChar(255) @map("auth_provider_id")
+  phoneNumber     String?  @db.NVarChar(20)  @map("phone_number")
+  email           String?  @db.NVarChar(255) @map("email")
+  isAnonymous     Boolean  @db.Bit @default(false) @map("is_anonymous")
+  isActive        Boolean  @db.Bit @default(true) @map("is_active")
+  accountId       String?  @db.NVarChar(255) @map("account_id")
+
+  @@map("users")
+  @@index([authProvider, authProviderId], map: "idx_provider_id")
 }

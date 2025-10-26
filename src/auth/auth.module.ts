@@ -9,10 +9,11 @@ import { TwilioController } from './twilio.controller';
 import { AuthEmailService } from './email.service';
 import { AuthEmailController } from './email.controller';
 import { UserDevicesService } from './user-devices.service';
+import { AuthUsersService } from './users.service';
 
 @Module({
   controllers: [AuthController, TwilioController, AuthEmailController],
-  providers: [AuthGuard, AuthService, AuthUserService, TwilioService, AuthEmailService, UserDevicesService, { provide: 'AuthProvider', useClass: SupabaseAuthProvider }],
-  exports: [AuthService, 'AuthProvider', AuthUserService, TwilioService, AuthEmailService, UserDevicesService], // export AuthProvider token and AuthUserService
+  providers: [AuthGuard, AuthService, AuthUserService, TwilioService, AuthEmailService, UserDevicesService, AuthUsersService, { provide: 'AuthProvider', useClass: SupabaseAuthProvider }],
+  exports: [AuthService, 'AuthProvider', AuthUserService, TwilioService, AuthEmailService, UserDevicesService, AuthUsersService], // export AuthProvider token and AuthUserService
 })
 export class AuthModule {}

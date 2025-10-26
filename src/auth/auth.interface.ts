@@ -1,10 +1,10 @@
 export interface AuthProvider {
   // Create a user via admin API. Provide explicit email and/or phone. Password required for admin create.
   // confirmEmail: when true, skip sending confirmation (depends on provider behavior)
-  createUser(email: string, phone: string, password: string, metadata?: any, confirmEmail?: boolean): Promise<any>;
+  createUser(email: string, phone: string, password: string, roles?: any, confirmEmail?: boolean): Promise<any>;
 
   // Public signup (may trigger provider-delivered confirmation/OTP). Password may be optional for phone-only flows.
-  signup(email: string, phone: string, password?: string, metadata?: any): Promise<any>;
+  signup(email: string, phone: string, password?: string): Promise<any>;
 
   getUserById(userId: string): Promise<any>;
   assignRole(userId: string, role: string): Promise<any>;

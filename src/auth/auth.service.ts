@@ -5,6 +5,8 @@ import { UserDevicesService, DeviceInput } from './user-devices.service';
 import { access } from 'fs';
 import { ref } from 'process';
 import { EXCEPTION_FILTERS_METADATA } from '@nestjs/common/constants';
+import { AuthProvider as AuthProviderEnum } from '../common/enums';
+import { AuthUsersService } from './users.service';
 
 @Injectable()
 export class AuthService {
@@ -14,7 +16,8 @@ export class AuthService {
   constructor(
     @Inject('AuthProvider') private authProvider: AuthProvider,
     private authUserService: AuthUserService,
-    private userDevicesService: UserDevicesService
+    private userDevicesService: UserDevicesService,
+    private usersService: AuthUsersService
   ) {}
 
   // Normalize a username or identifier into an email address.
@@ -28,147 +31,66 @@ export class AuthService {
     return appendDomainIfMissing ? `${trimmed}@${this.emailDomain}` : '';
   }
 
+
   // --- sign up
-  async signUp(username: string, phone: string, role: string, password: string ) {
+  async signUp(email: string, phone: string, password: string, device:any ) {
     // username may be an email or system username; phone optional; password required; role is a string
     if (!password) throw new BadRequestException('password is required');
-    if (!username && !phone) throw new BadRequestException('username or phone is required');
+    if (!email && !phone) throw new BadRequestException('email or phone is required');
 
-    const identifier = username && username.trim().length > 0 ? username.trim() : (phone || '').trim();
-    const metadata = { role: role || 'user', phone: phone || null };
-
-    this.logger.log(`AuthService.signUp: creating account for identifier='${identifier}' role='${metadata.role}'`);
+    const identifier = email && email.trim().length > 0 ? email.trim() : (phone || '').trim();
+    let roles = ['user'];
+    // const metadata = { role: role || 'user', phone: phone || null };
+    this.logger.log(`AuthService.signUp: creating account for identifier='${identifier}' role='${roles}'`);
     // call provider.createUser(email, phone, password, metadata)
-    const email = this.normalizeUsernameToEmail(identifier, false);
-    return await this.authProvider.createUser(email, phone || '', password, metadata, true);
-  }
-
-  // --- sign in
-  async signIn(username: string, password: string) {
-    // Provide a single, unified Unauthorized response for any authentication or migration failures.
-    // Success responses return the provider's result (tokens/user data). Any failure throws UnauthorizedException.
-
-    if (!this.authProvider.signInWithPassword) {
-      throw new BadRequestException('Auth provider does not support signInWithPassword');
-    }
-
-    // Ensure the username exists in our legacy profile store before attempting provider auth or migration.
-    const userProfile = await this.authUserService.getUserProfileByUsername(username);
-    if (!userProfile) {
-      this.logger.log(`AuthService.signIn: username '${username}' does not exist`);
-      throw new UnauthorizedException('Invalid username or password');
-    }
-
-    // Normalize username to email
-    const userEmail = this.normalizeUsernameToEmail(username);
-
+    // const email = this.normalizeUsernameToEmail(identifier, false);
     try {
-      // If user already migrated to Supabase, attempt provider sign-in directly.
-      if (userProfile.supabaseMigrated === true) {
-        const supResult = await this.authProvider.signInWithPassword(userEmail, password);
+      // Prefer calling provider.signup which is the public signup surface. Keep the old createUser call commented for reference.
+      // const { data, error } =  await this.authProvider.createUser(email, phone || '', password, roles, false);
+      const { data, error } = await (this.authProvider as any).signup(email, phone || '', password);
+      if (error) throw new UnauthorizedException(error.message);
+      // this.logger.debug(`AuthService.signUp: provider createUser data: ` + JSON.stringify(data)); 
+      // const user = (authUser && (authUser as any)?.data?.user) || (authUser && (authUser as any)?.user) || null;
+      // After provider user created, insert into local users table
+      try {
+        const providerId = (data && (data as any)?.user?.id)  || null;
+        const userRec = await this.usersService.createUser({
+          user_name: email || null,
+          auth_provider: AuthProviderEnum.supabase,
+          auth_provider_id: providerId ? String(providerId) : null,
+          phone_number: phone || null,
+          email: email || null,
+          is_anonymous: false,
+          is_active: true,
+        });
+        this.logger.log(`AuthService.signUp: created local user id=${userRec?.id}`);
 
-        // Normalize provider response: success when there's no .error and a user/session in .data or .user
-        const hasError = supResult && ((supResult as any).error || (supResult as any).status === 'error');
-        const userPresent = !!((supResult as any)?.data?.user || (supResult as any)?.user);
+        // Create JWT token
+        // Cant genreate token because, user has to verify their email first
+        // Create user will not create token
+        // this.logger.debug(`AuthService.signUp: data=${JSON.stringify(data)}`);
+        // const refreshToken = (data && (data as any).session && (data as any).session.refresh_token) ? (data as any).session.refresh_token : null;
+        // this.logger.debug(`AuthService.signUp: generating JWT token for new user id=${userRec.id} device=${device?.id || 'n/a'} roles=${JSON.stringify(roles)} ${refreshToken}`);
+        // let response = await this.generateJWTToken(userRec.id, data.user, roles, device, data.session.refresh_token);
+        // this.logger.debug('AuthService.signUp: generated JWT token for new user id=' + (userRec?.id ?? 'unknown'));
+        // return response
+        return data;
 
-        if (!hasError && userPresent) {
-          this.logger.log(`AuthService.signIn: Supabase sign-in successful for '${username}'`);
-          return supResult;
-        }
-
-        // Any provider sign-in failure is treated as invalid credentials.
-        this.logger.log(`AuthService.signIn: Supabase sign-in failed for '${username}'`);
-        throw new UnauthorizedException('Invalid username or password');
+      } catch (uErr) {
+        this.logger.warn('AuthService.signUp: failed to insert user record in users table: ' + (uErr?.message || String(uErr)));
       }
 
-      // User exists but is not migrated: attempt legacy auth first, then migrate.
-      this.logger.log(`AuthService.signIn: user '${username}' exists but not migrated, attempting legacy authentication`);
-
-      const legacyAuthed = await this.authUserService.getUserLegacyAuthed(username, password);
-      if (!legacyAuthed) {
-        // Legacy credentials invalid.
-        this.logger.log(`AuthService.signIn: legacy authentication failed for '${username}'`);
-        throw new UnauthorizedException('Invalid username or password');
-      }
-
-      this.logger.log(`AuthService.signIn: legacy authentication successful for '${username}', attempting provider migration`);
-
-      // Create the user in the provider (idempotent: provider may return alreadyRegistered marker)
-      const created = await this.authProvider.createUser(userEmail, '', password, { role: 'user' });
-
-      // Inspect creation result for id or error markers without logging entire payload
-      const creationError = created && ((created as any).error || (created as any).status === 'error');
-      const createdUserId = (created && ((created as any)?.data?.user?.id || (created as any)?.user?.id)) || null;
-      const creationIndicatesExisting = created && (created as any).alreadyRegistered;
-
-      if (creationError && !creationIndicatesExisting && !createdUserId) {
-        this.logger.error(`AuthService.signIn: provider createUser returned an error during migration for '${username}'`);
-        throw new UnauthorizedException('Invalid username or password');
-      }
-
-      if (creationIndicatesExisting || createdUserId) {
-        const postSign = await this.authProvider.signInWithPassword(userEmail, password);
-        const postHasError = postSign && ((postSign as any).error || (postSign as any).status === 'error');
-        const postUserPresent = !!((postSign as any)?.data?.user || (postSign as any)?.user);
-
-        if (postHasError || !postUserPresent) {
-          this.logger.error(`AuthService.signIn: sign-in after provider creation failed for '${username}'`);
-          throw new UnauthorizedException('Invalid username or password');
-        }
-
-        // Mark migrated in legacy store. Don't fail the whole flow if marking fails; just log.
-        try {
-          await this.authUserService.markUserMigrated(userProfile.id as number);
-          this.logger.log(`AuthService.signIn: marked legacy user '${username}' as migrated`);
-        } catch (mErr) {
-          this.logger.warn('AuthService.signIn: failed to mark legacy user migrated: ' + (mErr?.message || String(mErr)));
-        }
-
-        return postSign;
-      }
-
-      // Unexpected createUser result — treat as failure
-      this.logger.error(`AuthService.signIn: unexpected createUser result during migration for '${username}'`);
-      throw new UnauthorizedException('Invalid username or password');
-    } catch (err) {
-      // Log concise diagnostics and return a unified Unauthorized response for callers.
-      this.logger.log(`AuthService.signIn: authentication flow failed for '${username}': ${err?.message || String(err)}`);
-      throw new UnauthorizedException('Invalid username or password');
+      // return data;
+    } catch (error) {
+      // Log structured error for diagnostics but avoid returning internal details to callers
+      this.logger.error('AuthService.signUp: provider signup failed', error);
+      throw new UnauthorizedException('Failed to create user account');
     }
-  }
-
-  // --- sign in (provider-only, bypass legacy migration)
-  async signInSupabase(identifier: string, password: string) {
-    if (!this.authProvider.signInWithPassword) {
-      throw new BadRequestException('Auth provider does not support signInWithPassword');
-    }
-    if (!identifier || !password) {
-      throw new UnauthorizedException('Username and password are required');
-    }
-
-    // Normalize identifier to email
-    const email = this.normalizeUsernameToEmail(identifier);
-
-    try {
-      const result = await this.authProvider.signInWithPassword(email, password);
-      // provider implementations may return an error object; treat non-error results as success
-      const hasError = result && ((result as any).error || (result as any).status === 'error');
-      const userPresent = !!((result as any)?.data?.user || (result as any)?.user);
-      if (!hasError && userPresent) {
-        this.logger.log(`AuthService.signInNative: provider sign-in successful for '${identifier}'`);
-        return result;
-      }
-
-      this.logger.log(`AuthService.signInNative: provider sign-in failed for '${identifier}'`);
-      throw new UnauthorizedException('Invalid username or password');
-    } catch (err) {
-      this.logger.log(`AuthService.signInNative: provider error for '${identifier}': ${err?.message || String(err)}`);
-      throw new UnauthorizedException('Invalid username or password');
-    }
+    
   }
 
   // --- sign in and return a server-issued token (bypasses legacy migration)
-  async signInPrivate(identifier: string, password: string, device: any) {
+  async signIn(identifier: string, password: string, device: any) {
 
     if (!this.authProvider.signInWithPassword) {
       throw new BadRequestException('Auth provider does not support signInWithPassword');
@@ -188,12 +110,62 @@ export class AuthService {
       let user = (data as any)?.user;
       //TODO: Assign proper roles defined in db
       let roles = ["user","admin","super-admin"]
+      //Get Refresh token
+      const refreshToken = (data && (data as any).session && (data as any).session.refresh_token) ? (data as any).session.refresh_token : null;
+      //Get userId from local db
+      const providerId = user?.id ? String(user.id) : null;
+      let dbUser: any = null;
 
-      let payload = {
+      if (providerId) {
+        try {
+          dbUser = await this.usersService.getUserByAuthProviderId(AuthProviderEnum.supabase, providerId);
+          this.logger.log(`AuthService.signIn: resolved local user for providerId=${providerId} -> id=${dbUser?.id ?? 'not found'}`);
+        } catch (lookupErr) {
+          this.logger.warn(`AuthService.signIn: error looking up user by providerId=${providerId}`, lookupErr);
+        }
+      }
+
+      let userId: number | null = dbUser?.id ?? null;
+
+      // if (!userId) {
+      //   // If no local user exists, create a minimal local record (keeps parity with signUp flow)
+      //   try {
+      //     const created = await this.usersService.createUser({
+      //       user_name: user?.email ?? null,
+      //       auth_provider: AuthProviderEnum.supabase,
+      //       auth_provider_id: providerId,
+      //       phone_number: user?.phone ?? null,
+      //       email: user?.email ?? null,
+      //       is_anonymous: false,
+      //       is_active: true,
+      //     });
+      //     userId = created?.id ?? null;
+      //     this.logger.log(`AuthService.signIn: created local user id=${userId} for providerId=${providerId}`);
+      //   } catch (createErr) {
+      //     this.logger.warn('AuthService.signIn: failed to create local user record', createErr);
+      //   }
+      // }
+
+      if (!userId) {
+        throw new UnauthorizedException('Local user record not found or could not be created');
+      }
+      let response = await this.generateJWTToken(userId, user, roles, device, refreshToken);
+      
+      return response;
+    } catch (err) {
+      this.logger.log(`AuthService.signInPrivate: authentication flow failed for '${identifier}': ${err?.message || String(err)}`);
+      // throw new UnauthorizedException('Invalid username or password');
+      throw new UnauthorizedException(err.message || 'Invalid username or password');
+    }
+  }
+
+ private async  generateJWTToken(userId: number, user:any, roles:any, device: any, refreshToken: string): Promise<any> {
+  // Avoid logging secrets (refresh tokens) or full user objects
+  this.logger.debug(`AuthService.generateJWTToken: generating token for userId=${userId} device=${device?.id || 'n/a'} roles=${JSON.stringify(roles)}`);
+ let payload = {
         id: user.id,
         email: user.email,
         brand: "vumber",
-        // access_token: serverToken,
         roles: roles,
         device: device
       }
@@ -210,7 +182,7 @@ export class AuthService {
       // Attempt to create a user device record. Build a minimal device object from available session/user data.
       try {
         const deviceObj: DeviceInput = {
-          user_id: 1234,
+          user_id: userId,
           device_id: device.id,
           device_type: device.type,
           device_name: device.name,
@@ -223,8 +195,8 @@ export class AuthService {
           notification_key: null, // Todo: assign notification keys
           notification_key_voip: null, //todo: assign voip keys
           ip_info: device.ip,
-          device_info: JSON.stringify(payload),
-          refresh_token: data.session.refresh_token || null
+          device_info: JSON.stringify(payload, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)),
+          refresh_token: refreshToken || null
         };
 
 
@@ -238,28 +210,22 @@ export class AuthService {
             this.logger.log('AuthService.signInPrivate: created user device record');
           }
         }
-      } catch (dErr) {
-        this.logger.warn('AuthService.signInPrivate: failed to create user device record: ' + (dErr?.message || String(dErr)));
-      }
 
-      // Return minimal, safe payload
-      let response = { 
+        let response = { 
         ...payload, 
         session: {
             access_token: newResponse.access_token, 
             token_type: 'bearer',
-            refresh_token: data.session.refresh_token, 
+            refresh_token: refreshToken, 
             expires_in: newResponse.expires_in, 
             expires_at : newResponse.expires_at 
         }
-        
-      };
-      
-      return response;
-    } catch (err) {
-      this.logger.log(`AuthService.signInPrivate: authentication flow failed for '${identifier}': ${err?.message || String(err)}`);
-      throw new UnauthorizedException('Invalid username or password');
-    }
+      }
+
+        return response;
+      } catch (dErr) {
+        this.logger.warn('AuthService.signInPrivate: failed to create user device record: ' + (dErr?.message || String(dErr)));
+      }
   }
 
   // --- refresh access token using refresh token
@@ -326,13 +292,6 @@ export class AuthService {
 
       // Build response similar to signInPrivate
       const response = {
-        // id: payload.id,
-        // email: payload.email,
-        // brand: payload.brand,
-        // roles: payload.roles,
-        // buildNumber: payload.buildNumber,
-        // platform: payload.platform,
-        // userDeviceId: payload.userDeviceId,
         ...payload,
         session: {
           access_token: accessToken,

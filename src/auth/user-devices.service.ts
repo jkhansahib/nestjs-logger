@@ -2,8 +2,17 @@ import { Injectable, BadRequestException } from '@nestjs/common';
 import { LoggerService } from '../logger/logger.service';
 import { PrismaClient } from '@prisma/client';
 
+// Helper to safely stringify objects that may contain BigInt values
+function safeStringify(obj: any) {
+  try {
+    return JSON.stringify(obj, (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
+  } catch (e) {
+    try { return String(obj); } catch { return '[unstringifiable]'; }
+  }
+}
+
 export interface DeviceInput {
-  user_id: number;
+  user_id: number | string | bigint;
   device_id: string;
   device_type: string;
   device_name?: string | null;
@@ -45,7 +54,8 @@ export class UserDevicesService {
 
     // attempt to coerce numeric user id if possible
     if (typeof userId === 'string' && userId.match(/^\d+$/)) {
-      userId = Number(userId);
+      // Keep as string for BigInt conversion later
+      userId = userId;
     }
 
     if (userId === null || userId === undefined) {
@@ -53,7 +63,7 @@ export class UserDevicesService {
     }
 
     const input: DeviceInput = {
-      user_id: Number(userId),
+      user_id: userId as number | string | bigint,
       device_id: String(deviceId),
       device_type: String(deviceType),
       device_name: (device as any)['device_name'] ?? (device as any)['deviceName'] ?? null,
@@ -89,7 +99,8 @@ export class UserDevicesService {
       // Map DeviceInput fields to Prisma UserDevice model fields
       const created = await (this.prisma as any).userDevice.create({
         data: {
-          userId: input.user_id,
+          // Prisma expects BigInt for userId after schema change
+          userId: typeof input.user_id === 'bigint' ? input.user_id : BigInt(String(input.user_id)),
           deviceId: input.device_id,
           deviceType: input.device_type,
           deviceName: input.device_name ?? null,
@@ -106,7 +117,7 @@ export class UserDevicesService {
           deviceInfo: input.device_info ?? null,
         }
       });
-      this.logger.debug?.('Prisma userDevice.create result: ' + JSON.stringify(created));
+      this.logger.debug?.('Prisma userDevice.create result: ' + safeStringify(created));
       return Number(created.id || 0);
     } catch (err: any) {
       this.logger.error('Prisma insertDevice failed', err);
@@ -119,7 +130,7 @@ export class UserDevicesService {
     if (!id) return false;
     try {
       const data: any = {};
-      if (updates.user_id !== undefined) data.userId = updates.user_id;
+      if (updates.user_id !== undefined) data.userId = typeof updates.user_id === 'bigint' ? updates.user_id : BigInt(String(updates.user_id));
       if (updates.device_id !== undefined) data.deviceId = updates.device_id;
       if (updates.device_type !== undefined) data.deviceType = updates.device_type;
       if (updates.device_name !== undefined) data.deviceName = updates.device_name ?? null;
@@ -171,7 +182,8 @@ export class UserDevicesService {
   // Find devices for a user
   async findDevicesByUserId(userId: number): Promise<any[]> {
     try {
-      const res = await (this.prisma as any).userDevice.findMany({ where: { userId } });
+      const normalized = typeof userId === 'bigint' ? userId : BigInt(String(userId));
+      const res = await (this.prisma as any).userDevice.findMany({ where: { userId: normalized } });
       return Array.isArray(res) ? res : [];
     } catch (err: any) {
       this.logger.error('Prisma findDevicesByUserId failed', err);
@@ -182,17 +194,21 @@ export class UserDevicesService {
   // Upsert device by device_id + user_id
   async upsertDevice(input: DeviceInput): Promise<number> {
     try {
-      this.logger.debug?.(`Prisma upsertDevice: checking existing device for user_id=${input.user_id} device_id=${input.device_id}`);
-      const existing = await (this.prisma as any).userDevice.findFirst({ where: { deviceId: input.device_id, userId: input.user_id } });
-      this.logger.debug?.('Prisma upsertDevice existing select result: ' + JSON.stringify(existing));
+      // Normalize user id to BigInt for Prisma queries (DB column is BIGINT)
+      const normalizedUserId = typeof input.user_id === 'bigint' ? input.user_id : BigInt(String(input.user_id));
+      this.logger.debug?.(`Prisma upsertDevice: checking existing device for user_id=${String(normalizedUserId)} device_id=${input.device_id}`);
+      const existing = await (this.prisma as any).userDevice.findFirst({ where: { deviceId: input.device_id, userId: normalizedUserId } });
+      this.logger.debug?.('Prisma upsertDevice existing select result: ' + safeStringify(existing));
       if (existing) {
         const id = existing.id;
-        await this.updateDevice(Number(id), input);
-        this.logger.debug?.(`Prisma upsertDevice: update completed for id=${id}`);
+        // ensure we pass numeric user_id when updating (use BigInt if needed)
+        const updateInput = { ...input, user_id: normalizedUserId } as any;
+        await this.updateDevice(Number(id), updateInput);
+        this.logger.debug?.(`Prisma upsertDevice: update completed for id=${String(id)}`);
         return Number(id);
       }
       const newRec = await (this.prisma as any).userDevice.create({ data: {
-        userId: input.user_id,
+        userId: normalizedUserId,
         deviceId: input.device_id,
         deviceType: input.device_type,
         deviceName: input.device_name ?? null,
@@ -208,7 +224,7 @@ export class UserDevicesService {
         ipInfo: input.ip_info ?? null,
         deviceInfo: input.device_info ?? null,
       }});
-      this.logger.debug?.(`Prisma upsertDevice: inserted new id=${newRec.id}`);
+      this.logger.debug?.(`Prisma upsertDevice: inserted new id=${String(newRec.id)}`);
       return Number(newRec.id || 0);
     } catch (err: any) {
       this.logger.error('Prisma upsertDevice failed', err);

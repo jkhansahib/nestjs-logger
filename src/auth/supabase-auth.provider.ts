@@ -20,11 +20,11 @@ export class SupabaseAuthProvider implements AuthProvider {
   }
 
   // Create a user via the admin API (thin wrapper)
-  async createUser(email: string, phone: string, password: string, metadata?: any, confirmEmail = false) {
+  async createUser(email: string, phone: string, password: string, roles?: any, confirmEmail = false) {
     const payload: any = {
       password,
       email_confirm: confirmEmail,
-      user_metadata: metadata || {},
+      // user_metadata: { roles: roles }|| {},
     };
     if (email) payload.email = String(email).trim();
     if (phone) payload.phone = String(phone).trim();
@@ -35,16 +35,38 @@ export class SupabaseAuthProvider implements AuthProvider {
 
   // Public signup (triggers Supabase delivery of confirmation/OTP depending on project settings)
   async signup(email: string, phone: string, password?: string, metadata?: any): Promise<any> {
-    const userObj: any = {};
-    if (email) userObj.email = String(email).trim();
-    if (phone) userObj.phone = String(phone).trim();
-    if (password) userObj.password = password;
+    this.loggerService?.debug(`SupabaseAuthProvider.signup: called for email=${email}, phone=${phone}`);  
+     try {
+      const userObj: any = {};
+      if (email) userObj.email = String(email).trim();
+      if (phone) userObj.phone = String(phone).trim();
+      if (password) userObj.password = password;
 
-    const options: any = {};
-    if (metadata) options.data = metadata;
+      const options: any = { data: {phone: userObj.phone}};
+      // if (metadata) options.data = metadata;
+    
+      const res = await (this.publicClient.auth as any).signUp(userObj, options);
 
-    const res = await (this.publicClient.auth as any).signUp(userObj, options);
-    return res;
+      // If Supabase returned a created user id, ensure the phone is persisted via the admin API
+      try {
+        const userId = (res && (res as any)?.data?.user?.id) || (res && (res as any)?.user?.id) || null;
+        if (userId && userObj.phone) {
+          // use service-role client to write authoritative fields
+          await (this.supabase as any).auth.admin.updateUserById(userId, { phone: userObj.phone });
+          this.loggerService?.debug('SupabaseAuthProvider.signup: persisted phone via admin.updateUserById');
+        }
+      } catch (e) {
+        this.loggerService?.warn('SupabaseAuthProvider.signup: failed to persist phone via admin API', e);
+        // do not fail signup on admin update issues
+      }
+
+      return res;
+
+    } catch (error) {
+      this.loggerService?.error('SupabaseAuthProvider.signup: error during signup', error);
+      throw error;
+    }
+    
   }
 
   async getUserById(userId: string): Promise<any> {

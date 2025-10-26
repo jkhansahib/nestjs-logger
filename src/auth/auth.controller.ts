@@ -11,13 +11,13 @@ export class AuthController {
 
   @Public()
   @Post('signup')
-  async signUp(@Body() body: { username: string;phone: string; roles: string; password: string }) {
-    console.log(`AuthController.signUp called for ${body.username}`);
-    if (!body.username || !body.password || !body.phone || !body.roles) {
+  async signUp(@Body() body: { email: string;phone: string; password: string, device:any }) {
+    console.log(`AuthController.signUp called for ${body.email}`);
+    if (!body.email || !body.password || !body.phone ) {
       throw new UnauthorizedException('Username,phone,roles and password are required');
     }
     
-    return this.Auth.signUp(body.username, body.phone, body.roles, body.password);
+    return this.Auth.signUp(body.email, body.phone, body.password, body.device);
   }
 
   @Public()
@@ -28,7 +28,7 @@ export class AuthController {
         throw new UnauthorizedException('Username and password are required');
       }   
       // return this.Auth.signInSupabase(body.username, body.password);
-      return this.Auth.signInPrivate(body.username, body.password, body.device || null);
+      return this.Auth.signIn(body.username, body.password, body.device || null);
     } catch (error) {
       console.error('Error during signIn:', error);
       throw error; // Re-throw the error after logging it
