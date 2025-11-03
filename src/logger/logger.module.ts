@@ -6,6 +6,19 @@ import 'winston-daily-rotate-file';
 import { LOGGER_ADAPTER } from './logger.adapter';
 import { WinstonAdapter } from './winston.adapter';
 
+// Helper to safely stringify objects including BigInt values
+const safeStringify = (obj: any): string => {
+  try {
+    return JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+  } catch (err) {
+    try {
+      return String(obj);
+    } catch (_e) {
+      return '[unserializable]';
+    }
+  }
+};
+
 @Global()
 @Module({
   imports: [
@@ -41,7 +54,7 @@ import { WinstonAdapter } from './winston.adapter';
               let ctx = '';
 
               if (message && typeof message === 'object') {
-                msgText = message.message ?? JSON.stringify(message);
+                msgText = message.message ?? safeStringify(message);
                 ctx = message.context ?? '';
               } else {
                 msgText = String(message ?? '');
@@ -52,7 +65,7 @@ import { WinstonAdapter } from './winston.adapter';
               if (rest.context) delete rest.context;
               if (rest.meta && rest.meta.context) delete rest.meta.context;
 
-              const restStr = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : '';
+              const restStr = Object.keys(rest).length ? ` ${safeStringify(rest)}` : '';
               return `${timestamp} : [${String(level).toUpperCase()}] : ${ctx} : ${msgText}${restStr}`;
             })
           ),
@@ -63,7 +76,8 @@ import { WinstonAdapter } from './winston.adapter';
       format: winston.format.combine(
         winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
         winston.format.printf(({ timestamp, level, message, context }) => {
-          return `${timestamp} [${level.toUpperCase()}] ${context || ''} ${message}`;
+          const msg = typeof message === 'object' ? safeStringify(message) : String(message);
+          return `${timestamp} [${level.toUpperCase()}] ${context || ''} ${msg}`;
         })
       ),
     }),

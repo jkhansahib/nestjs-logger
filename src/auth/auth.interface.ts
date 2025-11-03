@@ -8,6 +8,14 @@ export interface AuthProvider {
 
   getUserById(userId: string): Promise<any>;
   assignRole(userId: string, role: string): Promise<any>;
+
+  // Optional: generate an email confirmation / signup / invite link via admin.generateLink
+  // options: { password?: string; redirectTo?: string; type?: string }
+  generateEmailConfirmationLink?(
+    email: string,
+    options?: { password?: string; redirectTo?: string; type?: string }
+  ): Promise<any>;
+
   signInWithPassword(email: string, password: string): Promise<any>;
 
   // Optional: issue a custom token (e.g. server-signed JWT containing roles/claims)

@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, Req, UseGuards, UnauthorizedException } from '@nestjs/common';
+import { Controller, Post, Body, Get, Req, UseGuards, UnauthorizedException, Query } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { Public } from './public.decorator';
 import { Roles } from './roles.decorator';
@@ -8,6 +8,19 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 @Controller('auth')
 export class AuthController {
   constructor(private readonly Auth: AuthService) {}
+
+  @Public()
+  @Get('confirm-email')
+  async confirmEmail(@Query('action_link') action_link?: string, @Query('uid') uid?: string) {
+    if (!action_link ) throw new UnauthorizedException('action_link is required');
+    try {
+      const result = await this.Auth.confirmEmail(action_link, uid);
+      return result;
+    } catch (err) {
+      // Do not reveal internal errors or tokens
+      throw err;
+    }
+  }
 
   @Public()
   @Post('signup')

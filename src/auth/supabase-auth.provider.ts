@@ -20,7 +20,7 @@ export class SupabaseAuthProvider implements AuthProvider {
   }
 
   // Create a user via the admin API (thin wrapper)
-  async createUser(email: string, phone: string, password: string, roles?: any, confirmEmail = false) {
+  async createUser(email: string, phone: string, password: string, confirmEmail = false) {
     const payload: any = {
       password,
       email_confirm: confirmEmail,
@@ -112,6 +112,29 @@ export class SupabaseAuthProvider implements AuthProvider {
   async assignRole(userId: string, role: string) {
     const res = await (this.supabase as any).auth.admin.updateUserById(userId, { user_metadata: { role } });
     return res;
+  }
+
+  // Generate an email confirmation / signup / invite link via the Supabase admin.generateLink helper
+  // type: one of 'signup' | 'invite' | 'magiclink' | 'recovery' etc. Defaults to 'signup'.
+  async generateEmailConfirmationLink(
+    email: string,
+    options?: { password?: string; redirectTo?: string; type?: string }
+  ): Promise<any> {
+    if (!email) throw new Error('email is required');
+    const type = (options && options.type) || 'signup';
+    try {
+      const payload: any = { type, email };
+      if (options && options.password) payload.password = options.password;
+      if (options && options.redirectTo) payload.options = { redirectTo: options.redirectTo };
+
+      const res = await (this.supabase as any).auth.admin.generateLink(payload);
+      // Log only a non-sensitive summary
+      this.loggerService?.debug?.(`SupabaseAuthProvider.generateEmailConfirmationLink: type=${type} email=${email} success=${!res?.error}`);
+      return res;
+    } catch (err) {
+      this.loggerService?.error?.('SupabaseAuthProvider.generateEmailConfirmationLink: unexpected error', err);
+      throw err;
+    }
   }
 
   async signInWithPassword(email: string, password: string): Promise<any> {

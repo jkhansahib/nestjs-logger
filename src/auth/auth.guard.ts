@@ -21,6 +21,15 @@ import { platform } from 'os';
 export class AuthGuard implements CanActivate {
   private readonly logger = new Logger(AuthGuard.name);
 
+  // Safe stringify to handle BigInt in logged objects
+  private safeStringify(obj: any): string {
+    try {
+      return JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    } catch (err) {
+      try { return String(obj); } catch (_e) { return '[unserializable]'; }
+    }
+  }
+
   constructor(
     private reflector: Reflector,
     @Inject('AuthProvider') private readonly authProvider: any,
@@ -78,7 +87,7 @@ export class AuthGuard implements CanActivate {
       //       const roles = payload?.roles || payload?.user?.roles || (payload?.user_metadata && payload.user_metadata.role ? [payload.user_metadata.role] : []);
 
       //       request.user = { id: userId, email, roles, role: Array.isArray(roles) && roles.length > 0 ? roles[0] : 'user' };
-      //       this.logger.debug('Auth Guard: User: ' + JSON.stringify(request.user));
+      //       this.logger.debug('Auth Guard: User: ' + this.safeStringify(request.user));
       //       this.logger.log(`✔️ Verified provider token for user ${userId}`);
       //       verifiedByProvider = true;
       //     }
@@ -94,7 +103,7 @@ export class AuthGuard implements CanActivate {
         try {
           const secret = process.env.JWT_SECRET || 'dev-secret';
           const decoded = verify(token, secret) as any;
-          this.logger.debug('Auth Guard: Decoded server token: ' + JSON.stringify(decoded));
+          this.logger.debug('Auth Guard: Decoded server token: ' + this.safeStringify(decoded));
           if (decoded && decoded.id) {
             this.logger.log('Auth Guard: User Roles: ' + decoded.roles);
             const role = decoded.roles && decoded.roles.length > 0 ? decoded.roles[0] : (decoded.role || 'user');
@@ -121,7 +130,7 @@ export class AuthGuard implements CanActivate {
         throw new UnauthorizedException('Invalid token');
       }
 
-      this.logger.log(`User roles: ${request.user.roles}`);
+      this.logger.log(`User roles: ${this.safeStringify(request.user?.roles)}`);
       // Role check
       const requiredRoles = this.reflector.getAllAndOverride<string[]>(
         ROLES_KEY,
@@ -144,7 +153,7 @@ export class AuthGuard implements CanActivate {
 
       return true;
     } catch (error) {
-      this.logger.error('Auth Guard Error:', error);
+      this.logger.error('Auth Guard Error:', this.safeStringify(error));
       if (error instanceof ForbiddenException) throw error;
       throw new UnauthorizedException('Authentication failed');
     }

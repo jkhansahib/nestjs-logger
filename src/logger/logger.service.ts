@@ -8,16 +8,29 @@ export class LoggerService {
     @Optional() @Inject(LOGGER_ADAPTER) private readonly adapter?: ILoggerAdapter,
   ) {}
 
+  // Safe stringify helper to handle BigInt and other non-serializable values
+  private safeStringify(obj: any): string {
+    try {
+      return JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    } catch (err) {
+      try {
+        return String(obj);
+      } catch (_e) {
+        return '[unserializable]';
+      }
+    }
+  }
+
   private get logger(): ILoggerAdapter {
     // Provide a minimal console adapter when no adapter injected
     if (this.adapter) return this.adapter;
     return {
-      log: (m: any, meta?: any) => console.log('[INFO]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
-      info: (m: any, meta?: any) => console.log('[INFO]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
-      error: (m: any, meta?: any) => console.error('[ERROR]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
-      warn: (m: any, meta?: any) => console.warn('[WARN]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
-      debug: (m: any, meta?: any) => console.debug('[DEBUG]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
-      verbose: (m: any, meta?: any) => console.log('[VERBOSE]', meta || '', typeof m === 'object' ? JSON.stringify(m) : m),
+      log: (m: any, meta?: any) => console.log('[INFO]', meta || '', typeof m === 'object' ? this.safeStringify(m) : m),
+      info: (m: any, meta?: any) => console.log('[INFO]', meta || '', typeof m === 'object' ? this.safeStringify(m) : m),
+      error: (m: any, meta?: any) => console.error('[ERROR]', meta || '', typeof m === 'object' ? this.safeStringify(m) : m),
+      warn: (m: any, meta?: any) => console.warn('[WARN]', meta || '', typeof m === 'object' ? this.safeStringify(m) : m),
+      debug: (m: any, meta?: any) => console.debug('[DEBUG]', meta || '', typeof m === 'object' ? this.safeStringify(m) : m),
+      verbose: (m: any, meta?: any) => console.log('[VERBOSE]', meta || '', typeof m === 'object' ? this.safeStringify(m) : m),
       child: (meta: any) => null,
       getLogger: () => console,
     } as ILoggerAdapter;
@@ -45,7 +58,7 @@ export class LoggerService {
       }
 
       // final fallback
-      console.log(`[${String(method).toUpperCase()}]`, meta || '', typeof message === 'object' ? JSON.stringify(message) : message);
+      console.log(`[${String(method).toUpperCase()}]`, meta || '', typeof message === 'object' ? this.safeStringify(message) : message);
     } catch (err) {
       console.log(`[${String(method).toUpperCase()}]`, message, meta || '', '(logger fallback)');
     }

@@ -7,6 +7,7 @@ import { ref } from 'process';
 import { EXCEPTION_FILTERS_METADATA } from '@nestjs/common/constants';
 import { AuthProvider as AuthProviderEnum } from '../common/enums';
 import { AuthUsersService } from './users.service';
+import { AuthEmailService } from './email.service';
 
 @Injectable()
 export class AuthService {
@@ -17,7 +18,8 @@ export class AuthService {
     @Inject('AuthProvider') private authProvider: AuthProvider,
     private authUserService: AuthUserService,
     private userDevicesService: UserDevicesService,
-    private usersService: AuthUsersService
+    private usersService: AuthUsersService,
+    private authEmailService: AuthEmailService,
   ) {}
 
   // Normalize a username or identifier into an email address.
@@ -58,6 +60,138 @@ export class AuthService {
     return ['user'];
   }
 
+  // Safe JSON.stringify helper that serializes BigInt as strings and avoids throwing
+  private safeStringify(obj: any): string {
+    try {
+      return JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+    } catch (err) {
+      try {
+        return String(obj);
+      } catch (_e) {
+        return '[unserializable]';
+      }
+    }
+  }
+
+  // New helper: generate and send confirmation email (simple: provider generate link -> send via AuthEmailService)
+  private async sendConfirmationForUser(
+    userRec: any,
+    emailToUse: string,
+    password?: string,
+    providerCreateResp?: any,
+  ): Promise<{ confirmLink: string; providerResponse?: any }> {
+    const anyProvider = this.authProvider as any;
+    let providerResp: any = providerCreateResp || null;
+
+    // Try to get a provider-generated confirmation link or token (best-effort)
+    try {
+      if (typeof anyProvider.generateEmailConfirmationLink === 'function') {
+        try {
+          providerResp = await anyProvider.generateEmailConfirmationLink(emailToUse, {
+            password: password || undefined,
+            redirectTo: process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL.replace(/\/$/, '')}/welcome` : undefined,
+            type: 'signup',
+          });
+          this.logger.debug('providerResp from generateEmailConfirmationLink: ' + this.safeStringify(providerResp));
+        } catch (err) {
+          this.logger.warn('sendConfirmationForUser: provider.generateEmailConfirmationLink failed: ' + (err?.message || String(err)));
+        }
+      }
+    } catch (err) {
+      this.logger.debug('sendConfirmationForUser: skipped provider link generation: ' + (err?.message || String(err)));
+    }
+
+
+    // Derive a usable confirmation link. Use API_URL so the email points to the server endpoint that validates the token.
+    const apiBase = process.env.API_URL || `http://localhost:${process.env.PORT || '3000'}`;
+    let confirmLink = `${apiBase.replace(/\/$/, '')}/auth/confirm-email?action_link=${encodeURIComponent(providerResp.data.properties.action_link)}&uid=${encodeURIComponent(String(userRec?.id ?? ''))} `;
+
+    // If provider returned a direct link or token, prefer to embed the token but still point at our API endpoint
+    // try {
+    //   const maybeLink = providerResp && (providerResp.data?.link || providerResp.data?.token || providerResp.link || providerResp.token);
+    //   if (maybeLink) {
+    //     const str = String(maybeLink);
+    //     if (/^https?:\/\//i.test(str)) {
+    //       // If provider returned a full URL, use that as-is (but also include API URL in email body)
+    //       confirmLink = str;
+    //     } else {
+    //       confirmLink = `${apiBase.replace(/\/$/, '')}/auth/confirm-email?token=${encodeURIComponent(str)}&uid=${encodeURIComponent(String(userRec?.id ?? ''))}`;
+    //     }
+    //   }
+    // } catch (_e) {
+    //   // ignore
+    // }
+
+    // Send email via internal AuthEmailService (SendGrid preferred), do not fail signup on errors
+    const emailBodyText = `Confirm your email by visiting: ${confirmLink}`;
+    const emailBodyHtml = `<p>Please confirm your email by clicking <a href="${confirmLink}">this link</a>.</p><p>If that does not work, visit: <code>${confirmLink}</code></p>`;
+    try {
+      if (this.authEmailService && typeof this.authEmailService.sendMailViaSendgrid === 'function') {
+        await this.authEmailService.sendMailViaSendgrid(
+          emailToUse,
+          'Confirm your email',
+          emailBodyText,
+          emailBodyHtml
+        );
+        this.logger.log(`sendConfirmationForUser: sent confirmation email via SendGrid to ${emailToUse}`);
+      }  else {
+        this.logger.error(`sendConfirmationForUser: Unable to send email. confirmation link for ${emailToUse}: ${confirmLink}`);
+      }
+    } catch (err) {
+      this.logger.warn('sendConfirmationForUser: email send failed: ' + (err?.message || String(err)));
+    }
+
+    return { confirmLink, providerResponse: providerResp };
+  }
+
+  // Public: validate an email confirmation token/link and mark local user as confirmed/active
+  async confirmEmail(action_link?: string, uid?: string) {
+    if (!action_link) throw new BadRequestException('action_link is required');
+    const anyProvider = this.authProvider as any;
+
+    // decode if we encoded it when sending
+    const supabaseVerifyUrl = decodeURIComponent(action_link);
+    this.logger.log(`confirmEmail: calling Supabase verify URL: ${supabaseVerifyUrl}`);
+    // 1) Call Supabase verification URL server-side.
+    // This triggers Supabase to validate token and set email_confirmed_at.
+    const verifyResp = await fetch(supabaseVerifyUrl, { method: 'GET', redirect: 'manual' });
+
+    // Supabase usually responds with a 302 redirect; follow behavior differs depending on SDK/version.
+    // If verifyResp.status is 302, it's successful; if 200 maybe returns a page.
+    if (![200, 302, 303].includes(verifyResp.status)) {
+      // read body for error details (avoid logging token)
+      const body = await verifyResp.text();
+      console.error('Supabase verify error', verifyResp.status, body.slice(0,200));
+      // throw new UnauthorizedException('Invalid or expired confirmation link');
+      return { ok: false, status: verifyResp.status, message: 'Invalid or expired confirmation link' };
+    }
+    else {
+      this.logger.log(`confirmEmail: Supabase verification succeeded with status ${verifyResp.status}`);
+      // Update local user's email_confirmed_datetime using provided uid (best-effort)
+      const uidNum = uid ? Number(uid) : NaN;
+      this.logger.log(`confirmEmail: updating local user id=${uid} email_confirmed_datetime`);
+      if (isNaN(uidNum) || !Number.isFinite(uidNum)) {
+        this.logger.warn(`confirmEmail: invalid uid provided: ${uid}`);
+      } else {
+        try {
+          const updates = { email_confirmed_datetime: new Date() };
+          if (typeof this.usersService.updateUser === 'function') {
+            await this.usersService.updateUser(uidNum, updates);
+            this.logger.log(`confirmEmail: set email_confirmed_datetime for local user id=${uidNum}`);
+          }
+          else {
+            this.logger.warn('confirmEmail: usersService has no compatible update method to set email_confirmed_datetime');
+          }
+        } catch (err) {
+          this.logger.warn('confirmEmail: failed to update local user email_confirmed_datetime: ' + (err?.message || String(err)));
+        }
+      }
+      return { ok: true, status: verifyResp.status, message: 'Email confirmed successfully' };
+    }
+
+
+  }
+
   // --- sign up
   async signUp(email: string, phone: string, password: string, device:any ) {
     // username may be an email or system username; phone optional; password required; role is a string
@@ -72,8 +206,8 @@ export class AuthService {
     // const email = this.normalizeUsernameToEmail(identifier, false);
     try {
       // Prefer calling provider.signup which is the public signup surface. Keep the old createUser call commented for reference.
-      // const { data, error } =  await this.authProvider.createUser(email, phone || '', password, roles, false);
-      const { data, error } = await (this.authProvider as any).signup(email, phone || '', password);
+      const { data, error } =  await this.authProvider.createUser(email, phone || '', password, false);
+      // const { data, error } = await (this.authProvider as any).createUser(email, phone || '', password, false);
       if (error) throw new UnauthorizedException(error.message);
       // this.logger.debug(`AuthService.signUp: provider createUser data: ` + JSON.stringify(data)); 
       // const user = (authUser && (authUser as any)?.data?.user) || (authUser && (authUser as any)?.user) || null;
@@ -91,16 +225,47 @@ export class AuthService {
         });
         this.logger.log(`AuthService.signUp: created local user id=${userRec?.id}`);
 
-        // Create JWT token
-        // Cant genreate token because, user has to verify their email first
-        // Create user will not create token
-        // this.logger.debug(`AuthService.signUp: data=${JSON.stringify(data)}`);
-        // const refreshToken = (data && (data as any).session && (data as any).session.refresh_token) ? (data as any).session.refresh_token : null;
-        // this.logger.debug(`AuthService.signUp: generating JWT token for new user id=${userRec.id} device=${device?.id || 'n/a'} roles=${JSON.stringify(roles)} ${refreshToken}`);
-        // let response = await this.generateJWTToken(userRec.id, data.user, roles, device, data.session.refresh_token);
-        // this.logger.debug('AuthService.signUp: generated JWT token for new user id=' + (userRec?.id ?? 'unknown'));
-        // return response
-        return data;
+        
+        // Generate an email confirmation token/link and attempt to persist/send it
+        try {
+          // const anyProvider = this.authProvider as any;
+          const emailToUse = email || userRec?.email || identifier || '';
+
+          const { confirmLink } = await this.sendConfirmationForUser(userRec, emailToUse, password, data);
+
+          // Return a normalized response to caller
+          return {
+            ok: true,
+            confirmationLink: confirmLink,
+            user: userRec,
+            providerResponse: data,
+          };
+        } catch (err) {
+          this.logger.warn('AuthService.signUp: email confirmation flow failed: ' + (err?.message || String(err)));
+          return { ok: true, user: userRec, providerResponse: data };
+        }
+
+        // If phone provided, attempt to send an OTP via provider.sendOtp (if available)
+        // if (phone) {
+        //   const anyProvider = this.authProvider as any;
+        //     try {
+        //       const otpResult = await this.sendPhoneOtp(phone);
+        //       if ((otpResult as any)?.error) {
+        //         this.logger.error(`AuthService.signUp: sendOtp returned error for ${phone}: ${this.safeStringify((otpResult as any).error)}`);
+        //         return { ok: false, error: (otpResult as any).error?.message || 'Failed to send OTP', providerResponse: otpResult, user: userRec };
+        //       }
+        //       this.logger.log(`AuthService.signUp: OTP sent to ${phone}`);
+        //       return { ok: true, otpSent: true, providerResponse: otpResult, user: userRec, data };
+        //     } catch (sendErr) {
+        //       this.logger.error('AuthService.signUp: sendOtp threw an error', sendErr);
+        //       return { ok: false, error: sendErr?.message || String(sendErr), user: userRec, data };
+        //     }
+         
+        // }
+
+        // Fallback: return provider data when no phone or sendOtp not available
+        // return data;
+        // return data;
 
       } catch (uErr) {
         this.logger.warn('AuthService.signUp: failed to insert user record in users table: ' + (uErr?.message || String(uErr)));
@@ -188,7 +353,7 @@ export class AuthService {
   
  private async  generateJWTToken(userId: number, user:any, roles:any, device: any, refreshToken: string): Promise<any> {
   // Avoid logging secrets (refresh tokens) or full user objects
-  this.logger.debug(`AuthService.generateJWTToken: generating token for userId=${userId} device=${device?.id || 'n/a'} roles=${JSON.stringify(roles)}`);
+  this.logger.debug(`AuthService.generateJWTToken: generating token for userId=${userId} device=${device?.id || 'n/a'} roles=${this.safeStringify(roles)}`);
  let payload = {
         id: user.id,
         email: user.email,
@@ -222,7 +387,7 @@ export class AuthService {
           notification_key: null, // Todo: assign notification keys
           notification_key_voip: null, //todo: assign voip keys
           ip_info: device.ip,
-          device_info: JSON.stringify(payload, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)),
+          device_info: this.safeStringify(payload),
           refresh_token: refreshToken || null
         };
 
@@ -425,9 +590,9 @@ export class AuthService {
     try {
         const res = await anyProvider.sendOtpToPhone(phone, channel);
         this.logger.log(`sendPhoneOtp successful for ${phone}`);
-        this.logger.debug(`sendPhoneOtp result for ${phone}: ${JSON.stringify(res)}`);  
+        this.logger.debug(`sendPhoneOtp result for ${phone}: ${this.safeStringify(res)}`);  
         if((res as any)?.error){
-          this.logger.error(`sendPhoneOtp error for ${phone}: ${JSON.stringify((res as any).error)}`);
+          this.logger.error(`sendPhoneOtp error for ${phone}: ${this.safeStringify((res as any).error)}`);
           return { ok: false, error: (res as any).error?.message || 'Failed to send OTP' };
         } else {
           return { ok: true };
@@ -451,9 +616,9 @@ export class AuthService {
     // Do not log token
     const {data, error} = await anyProvider.verifyPhoneOtp(phone, token);
     this.logger.log(`verifyPhoneOtp completed for ${phone}`);
-    this.logger.debug(`verifyPhoneOtp result for ${phone}: ${JSON.stringify(data)}`);
+    this.logger.debug(`verifyPhoneOtp result for ${phone}: ${this.safeStringify(data)}`);
     if(error){
-      this.logger.error(`verifyPhoneOtp error for ${phone}: ${JSON.stringify(error)}`);
+      this.logger.error(`verifyPhoneOtp error for ${phone}: ${this.safeStringify(error)}`);
       throw new UnauthorizedException(error.message || 'Invalid OTP token');
     }
 

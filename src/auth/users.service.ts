@@ -10,6 +10,9 @@ export interface UserCreateInput {
   is_anonymous?: boolean;
   is_active?: boolean;
   account_id?: string | null;
+  // new confirmation timestamps (nullable)
+  email_confirmed_datetime?: string | Date | null;
+  phone_confirmed_datetime?: string | Date | null;
 }
 
 @Injectable()
@@ -29,11 +32,13 @@ export class AuthUsersService {
         isAnonymous: input.is_anonymous ?? false,
         isActive: input.is_active ?? true,
         accountId: input.account_id ?? null,
+        emailConfirmedDatetime: input.email_confirmed_datetime ? new Date(input.email_confirmed_datetime as any) : null,
+        phoneConfirmedDatetime: input.phone_confirmed_datetime ? new Date(input.phone_confirmed_datetime as any) : null,
       }});
-      this.logger.debug('AuthUsersService.createUser: created id=' + rec.id);
+      this.logger.debug('UsersService.createUser: created id=' + rec.id);
       return rec;
     } catch (err: any) {
-      this.logger.error('AuthUsersService.createUser failed', err);
+      this.logger.error('UsersService.createUser failed', err);
       throw err;
     }
   }
@@ -44,7 +49,7 @@ export class AuthUsersService {
       const rec = await (this.prisma as any).user.findUnique({ where: { id } });
       return rec;
     } catch (err: any) {
-      this.logger.error('AuthUsersService.getUserById failed', err);
+      this.logger.error('UsersService.getUserById failed', err);
       throw err;
     }
   }
@@ -55,7 +60,7 @@ export class AuthUsersService {
       const rec = await (this.prisma as any).user.findFirst({ where: { authProvider: provider, authProviderId: providerId } });
       return rec;
     } catch (err: any) {
-      this.logger.error('AuthUsersService.findByProvider failed', err);
+      this.logger.error('UsersService.findByProvider failed', err);
       throw err;
     }
   }
@@ -70,7 +75,7 @@ export class AuthUsersService {
       const rec = await (this.prisma as any).user.findFirst({ where: { authProvider: provider, authProviderId: providerId } });
       return rec ?? null;
     } catch (err: any) {
-      this.logger.error('AuthUsersService.getUserByAuthProviderId failed', err);
+      this.logger.error('UsersService.getUserByAuthProviderId failed', err);
       throw err;
     }
   }
@@ -87,11 +92,13 @@ export class AuthUsersService {
       if (updates.is_anonymous !== undefined) data.isAnonymous = !!updates.is_anonymous;
       if (updates.is_active !== undefined) data.isActive = !!updates.is_active;
       if (updates.account_id !== undefined) data.accountId = updates.account_id ?? null;
+      if (updates.email_confirmed_datetime !== undefined) data.emailConfirmedDatetime = updates.email_confirmed_datetime ? new Date(updates.email_confirmed_datetime as any) : null;
+      if (updates.phone_confirmed_datetime !== undefined) data.phoneConfirmedDatetime = updates.phone_confirmed_datetime ? new Date(updates.phone_confirmed_datetime as any) : null;
 
       const rec = await (this.prisma as any).user.update({ where: { id }, data });
       return rec;
     } catch (err:any) {
-      this.logger.error('AuthUsersService.updateUser failed', err);
+      this.logger.error('UsersService.updateUser failed', err);
       throw err;
     }
   }
@@ -102,7 +109,7 @@ export class AuthUsersService {
       await (this.prisma as any).user.delete({ where: { id } });
       return true;
     } catch (err:any) {
-      this.logger.error('AuthUsersService.deleteUser failed', err);
+      this.logger.error('UsersService.deleteUser failed', err);
       throw err;
     }
   }
